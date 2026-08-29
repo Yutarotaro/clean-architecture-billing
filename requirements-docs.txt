@@ -1,0 +1,3 @@
+# GitHub Pages に公開するドキュメントのビルド用。
+# アプリケーションの依存とは無関係なので、python/pyproject.toml には入れていない。
+mkdocs-material==9.5.49

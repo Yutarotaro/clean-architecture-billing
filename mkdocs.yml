@@ -1,0 +1,85 @@
+site_name: クリーンアーキテクチャで作るサブスクリプション課金
+site_description: 同じドメインを Python/FastAPI と Go で実装し、3 つの永続化実装で動かすサンプル
+site_url: https://Yutarotaro.github.io/clean-architecture-billing/
+repo_url: https://github.com/Yutarotaro/clean-architecture-billing
+repo_name: Yutarotaro/clean-architecture-billing
+edit_uri: edit/main/docs/
+copyright: MIT License
+
+theme:
+  name: material
+  language: ja
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: ダークモードに切り替え
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: ライトモードに切り替え
+
+nav:
+  - はじめに: index.md
+  - アーキテクチャ:
+      - レイヤーと依存の向き: architecture.md
+      - ドメインモデル: domain-model.md
+      - テスト戦略: testing.md
+  - 検証:
+      - 永続化は本当に閉じ込められるか: persistence-portability.md
+      - Python と Go の比較: python-vs-go.md
+  - 設計判断:
+      - あえて省いたもの: design-decisions.md
+      - ADR:
+          - 一覧: adr/index.md
+          - 0001 レイヤー境界: adr/0001-layer-boundaries.md
+          - 0002 インターフェースの置き場所: adr/0002-where-interfaces-live.md
+          - 0003 手書きマッパー: adr/0003-hand-written-mappers.md
+          - 0004 楽観ロックの隠蔽: adr/0004-optimistic-locking.md
+          - 0005 決済呼び出しの位置: adr/0005-charge-outside-transaction.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      # 既定の slugify は ASCII 以外を落とすため、日本語見出しのアンカーが
+      # "_1", "_2" になってページ内リンクが張れない。Unicode を保持するものに差し替える。
+      slugify: !!python/object/apply:pymdownx.slugs.slugify {kwds: {case: lower}}
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Yutarotaro/clean-architecture-billing
