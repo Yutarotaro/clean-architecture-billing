@@ -120,12 +120,35 @@ class RenewDueSubscriptions:
             return _RenewOutcome(invoice_id=invoice.id, terminated=False)
 
     def _expire_past_due(self, *, limit: int) -> int:
-        now = self._clock.now()
-        canceled = 0
+        """猶予を過ぎた契約を解約する。更新と同じく 1 件ずつトランザクションを切る。
+
+        当初はここで全件をまとめて 1 トランザクションにしていた。SQL では動くが、
+        DynamoDB の TransactWriteItems は 100 項目が上限なので、101 件目で落ちる。
+        ``limit`` の値が永続化実装の制約と結びついてしまうのは抽象の漏れであり、
+        バッチの粒度を実装に依存しない形に寄せることで解消した
+        （docs/persistence-portability.md）。
+
+        1 件ずつにすると「途中で落ちても、次の起動が続きから拾う」も同時に手に入る。
+        """
         with self._uow_factory() as uow:
-            for subscription in uow.subscriptions.list_past_due(limit=limit):
-                if subscription.expire_if_grace_over(at=now):
-                    uow.subscriptions.save(subscription)
-                    canceled += 1
-            uow.commit()
+            past_due_ids = [s.id for s in uow.subscriptions.list_past_due(limit=limit)]
+
+        canceled = 0
+        for subscription_id in past_due_ids:
+            if self._expire_one(subscription_id):
+                canceled += 1
         return canceled
+
+    def _expire_one(self, subscription_id: SubscriptionId) -> bool:
+        """1 件を解約する。猶予がまだ残っていれば何もせず False を返す。"""
+        now = self._clock.now()
+        with self._uow_factory() as uow:
+            subscription = uow.subscriptions.get(subscription_id)
+            if subscription is None:
+                # 一覧を取ってから今までのあいだに消えた。バッチ全体を止める理由はない。
+                return False
+            if not subscription.expire_if_grace_over(at=now):
+                return False
+            uow.subscriptions.save(subscription)
+            uow.commit()
+            return True
