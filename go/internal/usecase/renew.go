@@ -149,23 +149,65 @@ func (u *RenewDueSubscriptions) renewOne(
 	return invoiceID, terminated, err
 }
 
+// expirePastDue は猶予を過ぎた契約を解約する。更新と同じく 1 件ずつトランザクションを切る。
+//
+// 当初はここで全件をまとめて 1 トランザクションにしていた。SQL では動くが、DynamoDB の
+// TransactWriteItems は 100 項目が上限なので 101 件目で落ちる。limit の値が永続化実装の
+// 制約と結びついてしまうのは抽象の漏れであり、バッチの粒度を実装に依存しない形に
+// 寄せることで解消した（docs/persistence-portability.md）。
+//
+// 1 件ずつにすると「途中で落ちても、次の起動が続きから拾う」も同時に手に入る。
 func (u *RenewDueSubscriptions) expirePastDue(ctx context.Context, limit int) (int, error) {
-	now := u.clock.Now()
-	canceled := 0
-	err := inTransaction(ctx, u.factory, func(uow UnitOfWork) error {
+	var pastDueIDs []domain.SubscriptionID
+	if err := inTransaction(ctx, u.factory, func(uow UnitOfWork) error {
 		pastDue, err := uow.Subscriptions().ListPastDue(ctx, limit)
 		if err != nil {
 			return err
 		}
 		for _, subscription := range pastDue {
-			if subscription.ExpireIfGraceOver(now, domain.GracePeriod) {
-				if err := uow.Subscriptions().Save(ctx, subscription); err != nil {
-					return err
-				}
-				canceled++
-			}
+			pastDueIDs = append(pastDueIDs, subscription.ID)
 		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+
+	canceled := 0
+	for _, id := range pastDueIDs {
+		expired, err := u.expireOne(ctx, id)
+		if err != nil {
+			return 0, err
+		}
+		if expired {
+			canceled++
+		}
+	}
+	return canceled, nil
+}
+
+// expireOne は 1 件を解約する。猶予がまだ残っていれば何もせず false を返す。
+func (u *RenewDueSubscriptions) expireOne(
+	ctx context.Context, id domain.SubscriptionID,
+) (bool, error) {
+	now := u.clock.Now()
+	expired := false
+	err := inTransaction(ctx, u.factory, func(uow UnitOfWork) error {
+		subscription, err := uow.Subscriptions().Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		if subscription == nil {
+			// 一覧を取ってから今までのあいだに消えた。バッチ全体を止める理由はない。
+			return nil
+		}
+		if !subscription.ExpireIfGraceOver(now, domain.GracePeriod) {
+			return nil
+		}
+		if err := uow.Subscriptions().Save(ctx, subscription); err != nil {
+			return err
+		}
+		expired = true
 		return uow.Commit()
 	})
-	return canceled, err
+	return expired, err
 }

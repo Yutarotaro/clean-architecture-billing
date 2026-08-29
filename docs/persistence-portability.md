@@ -124,12 +124,34 @@ if len(staged) > TRANSACTION_ITEM_LIMIT:
     )
 ```
 
-更新バッチの `_expire_past_due` は、猶予切れの契約をまとめて 1 トランザクションで更新します。
-SQL なら 1 万件でも動きますが、DynamoDB では 101 件目で落ちます。
-**ユースケース側の `limit` の値が、永続化実装の制約と結びついてしまっている**わけです。
+当初、更新バッチの `_expire_past_due` は猶予切れの契約をまとめて 1 トランザクションで
+更新していました。SQL なら 1 万件でも動きますが、DynamoDB では 101 件目で落ちます。
+**ユースケース側の `limit` の値が、永続化実装の制約と結びついてしまっていた**わけです。
 
-これは「リポジトリの抽象が漏れている」典型例です。正直に言えば、
-バッチの粒度を最初から「1 件 1 トランザクション」に寄せておくのが正解でした。
+これを、更新処理と同じく **1 件 1 トランザクション**に寄せて解消しました。
+
+```python title="application/usecases/renew_due_subscriptions.py"
+def _expire_past_due(self, *, limit: int) -> int:
+    with self._uow_factory() as uow:
+        past_due_ids = [s.id for s in uow.subscriptions.list_past_due(limit=limit)]
+
+    canceled = 0
+    for subscription_id in past_due_ids:
+        if self._expire_one(subscription_id):   # 1 件ごとにトランザクションを開く
+            canceled += 1
+    return canceled
+```
+
+!!! warning "「漏れがなくなった」わけではない"
+    100 項目の上限は依然として存在し、インターフェースのどこにも書かれていません。
+    やったのは **抽象を直すことではなく、どの実装でも成立する粒度に設計を寄せること**です。
+
+    言い換えると、この抽象は「3 実装の最小公倍数」でしか安全に使えません。
+    リポジトリパターンを入れれば永続化のことを考えなくてよくなる、わけではない
+    という具体例です。
+
+    副産物として「途中で落ちても、次の起動が続きから拾う」も手に入りました。
+    バッチとしてはそもそもこちらが正しい形です。
 
 ### 3. 悲観ロックが存在しない
 

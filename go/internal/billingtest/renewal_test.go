@@ -229,3 +229,44 @@ func assertStatus(t *testing.T, f *fixture, subscriptionID, want string) {
 		t.Errorf("Status = %s, want %s", view.Status, want)
 	}
 }
+
+// 猶予切れの契約が複数あっても、1 件ずつ独立して解約される。
+//
+// まとめて 1 トランザクションにしていると、DynamoDB では 100 件で頭打ちになる。
+// ユースケースの limit が永続化実装の制約と結びついてしまうため、
+// バッチの粒度を 1 件に寄せてある。
+func TestEveryPastDueSubscriptionIsExpiredIndependently(t *testing.T) {
+	eachBackend(t, func(t *testing.T, factory usecase.UnitOfWorkFactory) {
+		f := newFixture(t, factory)
+		f.gateway = payment.NewFakeDeclining(func(usecase.ChargeRequest) bool { return true })
+
+		var subscriptionIDs []string
+		for _, customer := range []string{"cus-1", "cus-2", "cus-3"} {
+			result, err := f.subscribeUC().Execute(context.Background(), usecase.SubscribeCommand{
+				CustomerID: customer, PlanID: "basic",
+			})
+			if err != nil {
+				t.Fatalf("subscribe: %v", err)
+			}
+			subscriptionIDs = append(subscriptionIDs, result.Subscription.ID)
+			assertStatus(t, f, result.Subscription.ID, "past_due")
+		}
+
+		// 猶予 14 日を過ぎる。契約期間はまだ満了していないので、更新は走らない。
+		f.clock.Set(jan.AddDate(0, 0, 15))
+		report, err := f.renewUC().Execute(context.Background(), 100)
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+
+		if report.Renewed != 0 {
+			t.Errorf("Renewed = %d, want 0", report.Renewed)
+		}
+		if report.CanceledForNonpayment != 3 {
+			t.Errorf("CanceledForNonpayment = %d, want 3", report.CanceledForNonpayment)
+		}
+		for _, id := range subscriptionIDs {
+			assertStatus(t, f, id, "canceled")
+		}
+	})
+}

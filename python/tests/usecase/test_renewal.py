@@ -146,3 +146,35 @@ def test_the_batch_processes_each_subscription_independently(
     for subscription_id in ids_created:
         view = container.queries.get_subscription(SubscriptionId(subscription_id))
         assert view.current_period_start == FEB
+
+
+def test_every_past_due_subscription_is_expired_independently(
+    uow_factory: UnitOfWorkFactory, clock: FixedClock, ids: SequentialIdGenerator
+) -> None:
+    """猶予切れの契約が複数あっても、1 件ずつ独立して解約される。
+
+    まとめて 1 トランザクションにしていると、DynamoDB では 100 件で頭打ちになる。
+    ユースケースの limit が永続化実装の制約と結びついてしまうため、
+    バッチの粒度を 1 件に寄せてある。
+    """
+    declining = FakePaymentGateway(decline_when=lambda _: True)
+    container = Container(uow_factory=uow_factory, clock=clock, ids=ids, gateway=declining)
+    container.seed_plans()
+
+    subscription_ids = [
+        container.subscribe_to_plan.execute(
+            SubscribeCommand(customer_id=f"cus-{index}", plan_id="basic")
+        ).subscription.id
+        for index in range(3)
+    ]
+    for subscription_id in subscription_ids:
+        assert container.queries.get_subscription(subscription_id).status == "past_due"
+
+    # 猶予 14 日を過ぎる。契約期間はまだ満了していないので、更新は走らない。
+    clock.set(datetime(2026, 1, 16, tzinfo=UTC))
+    report = container.renew_due_subscriptions.execute()
+
+    assert report.renewed == 0
+    assert report.canceled_for_nonpayment == 3
+    for subscription_id in subscription_ids:
+        assert container.queries.get_subscription(subscription_id).status == "canceled"
