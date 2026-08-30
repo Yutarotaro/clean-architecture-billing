@@ -36,7 +36,7 @@ uv run uvicorn billing.presentation.main:app --reload
 <http://127.0.0.1:8000/docs> で OpenAPI の画面が開きます。
 
 ```bash
-uv run pytest          # 215 ケース（3 つの永続化実装ぶん）
+uv run pytest          # 262 ケース（3 つの永続化実装ぶん）
 uv run ruff check .
 uv run mypy
 ```
@@ -46,7 +46,7 @@ uv run mypy
 ```bash
 cd go
 go run ./cmd/api       # http://127.0.0.1:8080/health
-go test ./...          # 183 ケース（2 つの永続化実装ぶん）
+go test ./...          # 224 ケース（2 つの永続化実装ぶん）
 ```
 
 ### 永続化を切り替える
