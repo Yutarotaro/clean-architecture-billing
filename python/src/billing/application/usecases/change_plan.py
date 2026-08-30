@@ -12,10 +12,17 @@ from billing.application.dto import (
     SubscriptionView,
 )
 from billing.application.errors import ConflictingRequest, EntityNotFound
-from billing.application.ports import Clock, IdGenerator, PaymentGateway
+from billing.application.ports import Clock, IdGenerator, PaymentGateway, UnitOfWork
 from billing.domain.ids import InvoiceId, PlanId, SubscriptionId
 from billing.domain.invoice import Invoice, InvoiceLine
 from billing.domain.plan import Plan
+
+#: クライアントが指定した冪等キーに付ける接頭辞。
+#:
+#: 内部で組み立てる鍵（``initial:<id>``、``renew:<id>:<iso>``）と名前空間を分ける。
+#: 分けないと ``Idempotency-Key: initial:sub-1`` のような値で初回請求の請求書が
+#: 引き当てられ、明細の構造が違うまま復元されて壊れる。
+KEY_PREFIX = "change:"
 
 
 class ChangePlan:
@@ -42,24 +49,13 @@ class ChangePlan:
 
     def execute(self, command: ChangePlanCommand) -> ChangePlanResult:
         now = self._clock.now()
+        key = KEY_PREFIX + command.idempotency_key
 
         with self._uow_factory() as uow:
-            existing = uow.invoices.find_by_idempotency_key(command.idempotency_key)
+            existing = uow.invoices.find_by_idempotency_key(key)
             if existing is not None:
-                if existing.subscription_id != command.subscription_id:
-                    raise ConflictingRequest(
-                        f"idempotency key {command.idempotency_key!r} "
-                        f"was used for another subscription"
-                    )
                 # 同じ要求が再送された。もう一度課金してはいけない。
-                subscription = uow.subscriptions.get(SubscriptionId(command.subscription_id))
-                if subscription is None:
-                    raise EntityNotFound("subscription", command.subscription_id)
-                return ChangePlanResult(
-                    subscription=SubscriptionView.of(subscription),
-                    proration=_proration_view_of(existing),
-                    invoice=InvoiceView.of(existing),
-                )
+                return self._replay(uow, command, existing)
 
             subscription = uow.subscriptions.get(SubscriptionId(command.subscription_id))
             if subscription is None:
@@ -74,32 +70,37 @@ class ChangePlan:
                 current_plan=current_plan, new_plan=new_plan, at=now
             )
 
-            invoice: Invoice | None = None
-            if proration.net.is_positive:
-                invoice = Invoice.issue(
-                    id=InvoiceId(self._ids.new_id()),
-                    customer_id=subscription.customer_id,
-                    subscription_id=subscription.id,
-                    lines=[
-                        InvoiceLine(f"{current_plan.name} 未使用分", -proration.credit),
-                        InvoiceLine(f"{new_plan.name} 残期間分", proration.charge),
-                    ],
-                    currency=proration.net.currency,
-                    at=now,
-                    idempotency_key=command.idempotency_key,
-                )
-                uow.invoices.add(invoice)
+            # 差額が 0 以下でも請求書は必ず発行する。作らないと冪等キーを記録する
+            # 場所がなくなり、再送が「すでにそのプランです」というエラーになる。
+            invoice = Invoice.issue(
+                id=InvoiceId(self._ids.new_id()),
+                customer_id=subscription.customer_id,
+                subscription_id=subscription.id,
+                lines=[
+                    InvoiceLine(f"{current_plan.name} 未使用分", -proration.credit),
+                    InvoiceLine(f"{new_plan.name} 残期間分", proration.charge),
+                ],
+                currency=proration.net.currency,
+                at=now,
+                idempotency_key=key,
+            )
+            needs_charge = proration.net.is_positive
+            if not needs_charge:
+                # 減額、または試用中の変更。請求するものがないので、発行と同時に
+                # 決着させる。返金や次回への繰り越しは行わない
+                # （docs/design-decisions.md を参照）。
+                invoice.settle_without_payment(at=now)
+            uow.invoices.add(invoice)
 
             uow.subscriptions.save(subscription)
             uow.commit()
             subscription_view = SubscriptionView.of(subscription)
             proration_view = ProrationView.of(proration)
+            invoice_view = InvoiceView.of(invoice)
 
-        if invoice is None:
-            # 差額が 0 以下、つまり減額。ここでは返金も繰り越しも行わず、次回の請求
-            # 期間から新しい料金が適用される（docs/design-decisions.md を参照）。
+        if not needs_charge:
             return ChangePlanResult(
-                subscription=subscription_view, proration=proration_view, invoice=None
+                subscription=subscription_view, proration=proration_view, invoice=invoice_view
             )
 
         outcome = charge_invoice(
@@ -114,6 +115,23 @@ class ChangePlan:
             invoice=InvoiceView.of(outcome.invoice),
         )
 
+    def _replay(
+        self, uow: UnitOfWork, command: ChangePlanCommand, existing: Invoice
+    ) -> ChangePlanResult:
+        """再送に対して、保存済みの請求書から同じ結果を組み立て直す。"""
+        if existing.subscription_id != command.subscription_id:
+            raise ConflictingRequest(
+                f"idempotency key {command.idempotency_key!r} was used for another subscription"
+            )
+        subscription = uow.subscriptions.get(SubscriptionId(command.subscription_id))
+        if subscription is None:
+            raise EntityNotFound("subscription", command.subscription_id)
+        return ChangePlanResult(
+            subscription=SubscriptionView.of(subscription),
+            proration=_proration_view_of(existing),
+            invoice=InvoiceView.of(existing),
+        )
+
 
 def _require_plan(plan: Plan | None, plan_id: str) -> Plan:
     if plan is None:
@@ -122,7 +140,17 @@ def _require_plan(plan: Plan | None, plan_id: str) -> Plan:
 
 
 def _proration_view_of(invoice: Invoice) -> ProrationView:
-    """再送時に、保存済みの請求書から内訳を復元する。"""
+    """再送時に、保存済みの請求書から内訳を復元する。
+
+    このユースケースが発行した請求書は必ず「未使用分」「残期間分」の 2 行を持つ。
+    接頭辞で名前空間を分けているので他の経路の請求書が来ることはないが、
+    壊れたデータに当たったときに IndexError で 500 を返さないよう検査しておく。
+    """
+    if len(invoice.lines) != 2:
+        raise ConflictingRequest(
+            f"invoice {invoice.id!r} does not look like a plan change "
+            f"(expected 2 lines, found {len(invoice.lines)})"
+        )
     credit = -invoice.lines[0].amount
     charge = invoice.lines[1].amount
     net = invoice.total

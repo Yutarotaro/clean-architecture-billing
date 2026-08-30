@@ -129,7 +129,8 @@ type changePlanRequest struct {
 type changePlanResponse struct {
 	Subscription subscriptionJSON `json:"subscription"`
 	Proration    prorationJSON    `json:"proration"`
-	Invoice      *invoiceJSON     `json:"invoice"`
+	// プラン変更は差額が 0 以下でも必ず請求書を残すので、常に存在する。
+	Invoice invoiceJSON `json:"invoice"`
 }
 
 type cancelRequest struct {

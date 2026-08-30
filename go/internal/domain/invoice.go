@@ -10,6 +10,12 @@ const (
 	InvoiceOpen InvoiceStatus = "open"
 	// InvoicePaid は支払い済み。
 	InvoicePaid InvoiceStatus = "paid"
+	// InvoiceNoPaymentDue は請求額が 0 以下で、決済の必要がないまま決着した状態。
+	//
+	// プラン変更で差額が発生しなかった場合（減額、または試用中の変更）に使う。
+	// 「支払われた」わけではないので paid とは区別する。この状態が存在しないと、
+	// 請求書を作らない経路が生まれ、そこでは冪等キーを記録する場所がなくなる。
+	InvoiceNoPaymentDue InvoiceStatus = "no_payment_due"
 	// InvoiceUncollectible は回収不能として締めた状態。会計上は貸倒れ。
 	InvoiceUncollectible InvoiceStatus = "uncollectible"
 	// InvoiceVoid は誤発行として無効化した状態。
@@ -87,9 +93,34 @@ func (i *Invoice) Total() (Money, error) {
 	return total, nil
 }
 
-// IsSettled は決着済みかを返す。
+// IsSettled は決着済みかを返す。これ以上の決済も状態遷移も起きない。
 func (i *Invoice) IsSettled() bool {
-	return i.Status == InvoicePaid || i.Status == InvoiceVoid || i.Status == InvoiceUncollectible
+	switch i.Status {
+	case InvoicePaid, InvoiceNoPaymentDue, InvoiceVoid, InvoiceUncollectible:
+		return true
+	default:
+		return false
+	}
+}
+
+// SettleWithoutPayment は請求額が 0 以下の請求書を、決済せずに決着させる。
+//
+// at は使わないが、他の状態遷移と署名を揃えてある。決着した時刻は IssuedAt
+// （発行と同時に決まるため）で分かる。
+func (i *Invoice) SettleWithoutPayment(at time.Time) error {
+	total, err := i.Total()
+	if err != nil {
+		return err
+	}
+	if total.IsPositive() {
+		return Invalid("invoice %q has an amount due (%s); it must be charged", i.ID, total)
+	}
+	if i.Status != InvoiceOpen {
+		return IllegalTransition("invoice", string(i.Status), "settle without payment")
+	}
+	_ = EnsureUTC(at)
+	i.Status = InvoiceNoPaymentDue
+	return nil
 }
 
 // MarkPaid は支払い済みにする。

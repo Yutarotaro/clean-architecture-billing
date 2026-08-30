@@ -146,7 +146,8 @@ class SubscribeResult:
 class ChangePlanResult:
     subscription: SubscriptionView
     proration: ProrationView
-    invoice: InvoiceView | None
+    invoice: InvoiceView
+    """プラン変更は差額が 0 以下でも必ず請求書を残すので、常に存在する。"""
 
 
 @dataclass(frozen=True, slots=True)

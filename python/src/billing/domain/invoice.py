@@ -19,6 +19,15 @@ class InvoiceStatus(StrEnum):
     PAID = "paid"
     """支払い済み。"""
 
+    NO_PAYMENT_DUE = "no_payment_due"
+    """請求額が 0 以下で、決済の必要がないまま決着した。
+
+    プラン変更で差額が発生しなかった場合（減額、または試用中の変更）に使う。
+    「支払われた」わけではないので paid とは区別する。記録としては残すが、
+    決済代行には送らない。この状態が存在しないと、請求書を作らない経路が生まれ、
+    そこでは冪等キーを記録する場所がなくなる。
+    """
+
     UNCOLLECTIBLE = "uncollectible"
     """回収不能として締めた。会計上は貸倒れ。"""
 
@@ -99,7 +108,13 @@ class Invoice:
 
     @property
     def is_settled(self) -> bool:
-        return self.status in (InvoiceStatus.PAID, InvoiceStatus.VOID, InvoiceStatus.UNCOLLECTIBLE)
+        """決着済みか。これ以上の決済も状態遷移も起きない。"""
+        return self.status in (
+            InvoiceStatus.PAID,
+            InvoiceStatus.NO_PAYMENT_DUE,
+            InvoiceStatus.VOID,
+            InvoiceStatus.UNCOLLECTIBLE,
+        )
 
     def mark_paid(self, *, at: datetime) -> None:
         if self.status is InvoiceStatus.PAID:
@@ -110,6 +125,21 @@ class Invoice:
             raise IllegalTransition("invoice", self.status, "pay")
         self.status = InvoiceStatus.PAID
         self.paid_at = ensure_aware(at, field="at")
+
+    def settle_without_payment(self, *, at: datetime) -> None:
+        """請求額が 0 以下の請求書を、決済せずに決着させる。
+
+        ``at`` は使わないが、他の状態遷移と署名を揃えてある。決着した時刻は
+        ``issued_at``（発行と同時に決まるため）で分かる。
+        """
+        if self.total.is_positive:
+            raise InvariantViolation(
+                f"invoice {self.id!r} has an amount due ({self.total}); it must be charged"
+            )
+        if self.status is not InvoiceStatus.OPEN:
+            raise IllegalTransition("invoice", self.status, "settle without payment")
+        ensure_aware(at, field="at")
+        self.status = InvoiceStatus.NO_PAYMENT_DUE
 
     def mark_uncollectible(self) -> None:
         if self.status is not InvoiceStatus.OPEN:

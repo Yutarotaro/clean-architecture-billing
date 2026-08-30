@@ -136,7 +136,7 @@ class SubscribeResponse(BaseModel):
 class ChangePlanResponse(BaseModel):
     subscription: SubscriptionResponse
     proration: ProrationResponse
-    invoice: InvoiceResponse | None
+    invoice: InvoiceResponse
 
 
 class PaymentWebhookRequest(BaseModel):

@@ -117,7 +117,7 @@ func (h Handlers) changePlan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, changePlanResponse{
 		Subscription: toSubscriptionJSON(result.Subscription),
 		Proration:    toProrationJSON(result.Proration),
-		Invoice:      toInvoiceJSONPtr(result.Invoice),
+		Invoice:      toInvoiceJSON(result.Invoice),
 	})
 }
 
