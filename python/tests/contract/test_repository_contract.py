@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -386,3 +387,49 @@ def test_settled_invoices_leave_the_unsettled_list(seeded: UnitOfWorkFactory) ->
 
     with seeded() as uow:
         assert uow.invoices.list_unsettled(issued_before=FEB) == []
+
+
+def test_committing_does_not_clobber_untouched_aggregates(seeded: UnitOfWorkFactory) -> None:
+    """自分が触っていない集約への、他トランザクションの更新を巻き戻さない。
+
+    楽観ロックは「触った集約」のバージョンしか見ない。commit がデータベース全体を
+    作業コピーで置き換える実装だと、触っていない集約への更新は検査を素通りして消える。
+    しかも誰にも検出されない。
+
+    これはインメモリ実装だけが持っていた欠陥だった。既存の
+    ``test_concurrent_update_is_detected`` は同一の集約しか競合させていないため
+    見逃していた。
+
+    後から書く側の commit が通るかどうかは実装によって違う。WAL モードの SQLite は
+    「読んだ時点のスナップショットが古い」ことを検出し、触っていない集約が動いた
+    だけでも書き込みを拒む。それは安全側の失敗なので許容する。契約として要求するのは
+    「sub-2 の更新が失われないこと」だけである。
+    """
+    with seeded() as uow:
+        uow.subscriptions.add(make_subscription("1"))
+        uow.subscriptions.add(make_subscription("2"))
+        uow.commit()
+
+    with seeded() as outer:
+        # outer は sub-1 だけを読む。sub-2 には一切触れない。
+        target = outer.subscriptions.get(SubscriptionId("sub-1"))
+        assert target is not None
+
+        with seeded() as inner:
+            other = inner.subscriptions.get(SubscriptionId("sub-2"))
+            assert other is not None
+            other.cancel(at=JAN, immediately=True)
+            inner.subscriptions.save(other)
+            inner.commit()
+
+        target.cancel(at=JAN, immediately=True)
+        with suppress(ConcurrencyConflict):
+            outer.subscriptions.save(target)
+            outer.commit()
+
+    with seeded() as uow:
+        untouched = uow.subscriptions.get(SubscriptionId("sub-2"))
+        assert untouched is not None
+        assert untouched.status is SubscriptionStatus.CANCELED, (
+            "触っていない集約への更新が巻き戻された"
+        )

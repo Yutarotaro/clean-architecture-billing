@@ -531,3 +531,82 @@ func invoiceIDsOf(invoices []*domain.Invoice) []domain.InvoiceID {
 	}
 	return found
 }
+
+// 自分が触っていない集約への、他トランザクションの更新を巻き戻さない。
+//
+// 楽観ロックは「触った集約」のバージョンしか見ない。commit がデータベース全体を
+// 作業コピーで置き換える実装だと、触っていない集約への更新は検査を素通りして消え、
+// しかも誰にも検出されない。Python 版のインメモリ実装が実際にこれを踏んでいた。
+//
+// 後から書く側（outer）の commit が通るかどうかは実装によって違う。WAL モードの
+// SQLite は「読んだ時点のスナップショットが古い」ことを検出して、触っていない集約が
+// 動いただけでも書き込みを拒む。それは安全側の失敗なので許容する。
+// 契約として要求するのは「sub-2 の更新が失われないこと」だけである。
+func TestCommittingDoesNotClobberUntouchedAggregates(t *testing.T) {
+	eachBackend(t, func(t *testing.T, factory usecase.UnitOfWorkFactory) {
+		seedPlans(t, factory)
+		ctx := context.Background()
+
+		withTx(t, factory, func(uow usecase.UnitOfWork) {
+			if err := uow.Subscriptions().Add(ctx, makeSubscription(t, "1", jan)); err != nil {
+				t.Fatalf("Add: %v", err)
+			}
+			if err := uow.Subscriptions().Add(ctx, makeSubscription(t, "2", jan)); err != nil {
+				t.Fatalf("Add: %v", err)
+			}
+			if err := uow.Commit(); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+		})
+
+		outer, err := factory(ctx)
+		if err != nil {
+			t.Fatalf("factory: %v", err)
+		}
+		defer func() { _ = outer.Rollback() }()
+
+		// outer は sub-1 だけを読む。sub-2 には一切触れない。
+		target, err := outer.Subscriptions().Get(ctx, "sub-1")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+
+		withTx(t, factory, func(inner usecase.UnitOfWork) {
+			other, err := inner.Subscriptions().Get(ctx, "sub-2")
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if err := other.Cancel(jan, true); err != nil {
+				t.Fatalf("Cancel: %v", err)
+			}
+			if err := inner.Subscriptions().Save(ctx, other); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			if err := inner.Commit(); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+		})
+
+		if err := target.Cancel(jan, true); err != nil {
+			t.Fatalf("Cancel: %v", err)
+		}
+		saveErr := outer.Subscriptions().Save(ctx, target)
+		if saveErr == nil {
+			saveErr = outer.Commit()
+		}
+		if saveErr != nil && !errors.Is(saveErr, usecase.ErrConcurrencyConflict) {
+			t.Fatalf("unexpected error: %v", saveErr)
+		}
+
+		withTx(t, factory, func(uow usecase.UnitOfWork) {
+			untouched, err := uow.Subscriptions().Get(ctx, "sub-2")
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if untouched.Status != domain.StatusCanceled {
+				t.Errorf("sub-2 status = %s, want canceled（触っていない集約への更新が巻き戻された）",
+					untouched.Status)
+			}
+		})
+	})
+}

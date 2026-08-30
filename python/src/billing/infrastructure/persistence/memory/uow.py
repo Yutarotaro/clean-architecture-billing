@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from types import TracebackType
 from typing import Self
 
@@ -11,7 +10,7 @@ from billing.domain.repositories import (
     PlanRepository,
     SubscriptionRepository,
 )
-from billing.infrastructure.persistence.memory.database import MemoryDatabase
+from billing.infrastructure.persistence.memory.database import MemoryDatabase, Staging
 from billing.infrastructure.persistence.memory.repositories import (
     InMemoryInvoiceRepository,
     InMemoryPlanRepository,
@@ -20,7 +19,7 @@ from billing.infrastructure.persistence.memory.repositories import (
 
 
 class InMemoryUnitOfWork:
-    """作業用のコピーの上で変更し、commit されたときだけ本体に反映する。
+    """変更をいったん溜め、commit のときだけデータベースに反映する。
 
     「テスト用だからトランザクションはなくていい」とはしない。commit を書き忘れた
     ユースケースがテストでは通って本番で壊れる、という事故がまさにここで防がれる。
@@ -35,7 +34,7 @@ class InMemoryUnitOfWork:
 
     def __init__(self, db: MemoryDatabase) -> None:
         self._db = db
-        self._working: MemoryDatabase | None = None
+        self._staging: Staging | None = None
 
     def __enter__(self) -> Self:
         self._begin()
@@ -47,22 +46,28 @@ class InMemoryUnitOfWork:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        # commit されないまま抜けたら、作業用コピーごと捨てる = rollback。
-        self._working = None
+        # commit されないまま抜けたら、溜めた変更ごと捨てる = rollback。
+        self._staging = None
 
     def commit(self) -> None:
-        if self._working is None:
+        if self._staging is None:
             raise RuntimeError("commit() called outside of a transaction")
-        self._db.replace_with(self._working)
-        # commit 後も同じトランザクション内で読み書きを続けられるよう、作業用コピーを
-        # 作り直す。本物の DB で commit 後に同じセッションを使い続けるのと同じ状況。
+        # 変更した集約だけを反映する。データベース全体を置き換えると、自分が触って
+        # いない集約への他トランザクションの更新まで巻き戻してしまう。楽観ロックは
+        # 触った集約のバージョンしか見ないので、その巻き戻しは誰にも検出されない。
+        self._db.plans.update(self._staging.plans)
+        self._db.subscriptions.update(self._staging.subscriptions)
+        self._db.invoices.update(self._staging.invoices)
+        self._db.versions.update(self._staging.versions)
+        # commit 後も同じ UnitOfWork を使い続けられるよう作り直す。バージョン追跡の
+        # 前提が変わるため、リポジトリごと入れ替える。
         self._begin()
 
     def rollback(self) -> None:
         self._begin()
 
     def _begin(self) -> None:
-        self._working = deepcopy(self._db)
-        self.plans = InMemoryPlanRepository(self._working)
-        self.subscriptions = InMemorySubscriptionRepository(self._working, self._db)
-        self.invoices = InMemoryInvoiceRepository(self._working, self._db)
+        self._staging = Staging()
+        self.plans = InMemoryPlanRepository(self._db, self._staging)
+        self.subscriptions = InMemorySubscriptionRepository(self._db, self._staging)
+        self.invoices = InMemoryInvoiceRepository(self._db, self._staging)

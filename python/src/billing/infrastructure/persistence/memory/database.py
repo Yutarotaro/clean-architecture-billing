@@ -12,14 +12,28 @@ from billing.domain.subscription import Subscription
 
 @dataclass
 class MemoryDatabase:
+    """コミット済みの状態。"""
+
     plans: dict[PlanId, Plan] = field(default_factory=dict)
     subscriptions: dict[SubscriptionId, Subscription] = field(default_factory=dict)
     invoices: dict[InvoiceId, Invoice] = field(default_factory=dict)
     #: 楽観ロック用のバージョン。SQL の version 列、DynamoDB の version 属性に相当する。
     versions: dict[str, int] = field(default_factory=dict)
 
-    def replace_with(self, other: MemoryDatabase) -> None:
-        self.plans = other.plans
-        self.subscriptions = other.subscriptions
-        self.invoices = other.invoices
-        self.versions = other.versions
+
+@dataclass
+class Staging:
+    """1 つの UnitOfWork の中で溜めた変更。
+
+    commit されるまで ``MemoryDatabase`` には触れない。読み取りはまずここを見るので、
+    同じトランザクションの中では自分の書き込みが見える（read-your-writes）。
+
+    「作業用にデータベース全体をコピーし、commit で丸ごと置き換える」方式にしては
+    いけない。楽観ロックは触った集約のバージョンしか見ないので、**自分が触っていない
+    集約への他トランザクションの更新が、検査を素通りして消える**。
+    """
+
+    plans: dict[PlanId, Plan] = field(default_factory=dict)
+    subscriptions: dict[SubscriptionId, Subscription] = field(default_factory=dict)
+    invoices: dict[InvoiceId, Invoice] = field(default_factory=dict)
+    versions: dict[str, int] = field(default_factory=dict)
