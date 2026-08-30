@@ -468,8 +468,131 @@ flowchart LR
 実行時には `ChangePlan` が `SqlSubscriptionRepository` を呼びますが、
 **コンパイル時の依存はどちらも内側のインターフェースに向かっています**。
 
-インターフェースを具体的にどこへ置くかは、言語の慣習によって変わります。
-詳細は [ADR-0002](adr/0002-where-interfaces-live.md) を参照してください。
+### インターフェースは全部内側にある
+
+| インターフェース | Python | Go |
+|---|---|---|
+| `SubscriptionRepository` / `InvoiceRepository` / `PlanRepository` | `domain/repositories.py` | `internal/usecase/ports.go` |
+| `Clock` / `IdGenerator` / `PaymentGateway` / `UnitOfWork` | `application/ports.py` | 同上 |
+
+`infrastructure/` と `internal/infra/` には**定義が 1 つもありません**。実装しかない。
+
+リポジトリだけ Python では `domain/` にあるのは、集約単位のリポジトリはドメインの語彙の
+一部だという DDD の考え方によります。`Clock` や `PaymentGateway` は「時計」「決済代行」で
+あってドメインの言葉ではないので `application/` です。Go は慣習に合わせて全部
+`usecase/` に置いています（[ADR-0002](adr/0002-where-interfaces-live.md)）。
+
+### なぜ「基底クラス」ではなく Protocol なのか
+
+抽象基底クラス（ABC）を継承させる方法もあります。使わなかったのは、
+**継承させると実装がインターフェースを import することになる**からです。
+
+=== "使っている方法（Protocol）"
+
+    ```python title="domain/repositories.py"
+    class SubscriptionRepository(Protocol):
+        def get(self, subscription_id: SubscriptionId) -> Subscription | None: ...
+        def add(self, subscription: Subscription) -> None: ...
+    ```
+
+    ```python title="infrastructure/persistence/sql/repositories.py"
+    class SqlSubscriptionRepository:          # 何も継承していない
+        def get(self, subscription_id: SubscriptionId) -> Subscription | None: ...
+    ```
+
+=== "使わなかった方法（ABC）"
+
+    ```python
+    from billing.domain.repositories import SubscriptionRepository   # ← この import
+
+    class SqlSubscriptionRepository(SubscriptionRepository):
+        def get(self, subscription_id: SubscriptionId) -> Subscription | None: ...
+    ```
+
+`Protocol` は**構造的部分型**です。「たまたま同じシグネチャのメソッドを持っている」
+だけで要求を満たすので、実装側は相手を知る必要がありません。
+
+| | ABC（継承） | Protocol（構造的部分型） |
+|---|---|---|
+| 実装側の import | **必要** | 不要 |
+| 依存の矢印 | 実装 → 抽象（実線） | なし |
+| 実装漏れの検出 | 実行時（インスタンス化時） | 静的（mypy） |
+
+### 本当に import していないことの確認
+
+主張だけでは意味がないので、手元で確かめられます。
+
+```bash
+grep -rn "billing.domain.repositories\|billing.application.ports"   python/src/billing/infrastructure/persistence/*/repositories.py
+```
+
+**1 件も出ません。** memory・SQLite・DynamoDB の 3 実装は、
+自分が何のインターフェースを満たしているのかを知らないまま動いています。
+
+import があるのは 2 箇所だけで、どちらもインターフェース自体のためではありません。
+
+- `{memory,sql,dynamo}/uow.py` — `subscriptions: SubscriptionRepository` という
+  **型注釈**のため（具象クラス名を外に見せないための宣言）
+- `payment/fake_gateway.py` — `PaymentResult`（値オブジェクト）と
+  `PaymentGatewayError`（例外）のため。`PaymentGateway` Protocol は import していない
+
+### Go では 1 箇所だけ破れる
+
+Go の interface も構造的部分型なので、同じことができます。実際、リポジトリの実装は
+インターフェースを知りません。
+
+ただし `UnitOfWork` だけは例外でした。**インターフェースを返すメソッド**を持つからです。
+
+```go title="internal/usecase/ports.go"
+type UnitOfWork interface {
+    Subscriptions() SubscriptionRepository   // 戻り値がインターフェース
+    Invoices() InvoiceRepository
+    Plans() PlanRepository
+}
+```
+
+Go の戻り値の型は共変ではないので、実装側も `usecase.SubscriptionRepository` を
+返すと書かねばなりません。
+
+```go title="internal/infra/sqlite/uow.go"
+func (u *UnitOfWork) Subscriptions() usecase.SubscriptionRepository { return u.subs }
+```
+
+**ここで `infra` が `usecase` を import します。** 依存の向きとしては内向きなので
+クリーンアーキテクチャ上は問題ありませんが、「実装は抽象を知らなくてよい」という
+性質はここで失われます。
+
+### Python 側の回避策と、mypy が教えてくれたこと
+
+Python では `UnitOfWork` を**読み取り専用プロパティ**にすることでこれを回避しています。
+
+```python title="application/ports.py"
+class UnitOfWork(Protocol):
+    @property
+    def subscriptions(self) -> SubscriptionRepository: ...
+
+    @property
+    def invoices(self) -> InvoiceRepository: ...
+```
+
+最初は普通の属性宣言で書いていました。
+
+```python
+class UnitOfWork(Protocol):
+    subscriptions: SubscriptionRepository    # これだと満たせない
+```
+
+これを mypy が拒否しました。**Protocol の「代入できる属性」は型として不変（invariant）に
+扱われる**ため、`SqlSubscriptionRepository` を持つ実装が
+`SubscriptionRepository` を要求するこの Protocol を満たせないのです。
+
+読み取り専用プロパティにすると共変になり、具象リポジトリを持つ実装がそのまま通ります。
+実装側は普通の属性のままで構いません。
+
+!!! note "型チェッカが設計を教えてくれた例"
+    「なぜ通らないのか」を追うと、**そもそも UnitOfWork の属性は差し替えられるべきでない**
+    という設計上の答えに行き着きました。エラーメッセージに従って `type: ignore` を
+    付けていたら、この気づきはありませんでした。
 
 ## 合成ルート
 
