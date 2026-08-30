@@ -312,3 +312,40 @@ func TestPaymentWebhookIsIdempotent(t *testing.T) {
 		}
 	})
 }
+
+// 支払い済みの請求書に遅れて届いた失敗通知は、契約に影響しない。
+//
+// webhook は配信順序を保証しない。成功のあとに失敗が届くのは異常ではなく通常の動作である。
+// ここで past_due に落とすと、支払い済みの顧客が「未払い」として猶予期間ののちに解約される。
+// 請求書は paid のまま、契約だけが canceled になり、どこにも警告は出ない。
+func TestStaleFailureNotificationIsIgnored(t *testing.T) {
+	eachBackend(t, func(t *testing.T, factory usecase.UnitOfWorkFactory) {
+		f := newFixture(t, factory)
+		subscribed := f.subscribe(t, "basic", "cus-1")
+		if subscribed.Invoice == nil || subscribed.Invoice.Status != "paid" {
+			t.Fatalf("invoice = %+v, want a paid invoice", subscribed.Invoice)
+		}
+
+		if _, err := f.paymentUC().Execute(context.Background(), usecase.PaymentNotification{
+			InvoiceID:     subscribed.Invoice.ID,
+			Succeeded:     false,
+			FailureReason: "insufficient_funds",
+		}); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+
+		assertStatus(t, f, subscribed.Subscription.ID, "active")
+
+		// バッチを回しても解約されない。past_due になっただけでは気づかれず、
+		// 14 日後の更新バッチで初めて顧客に影響が出るのがこの欠陥の怖いところ。
+		f.clock.Set(jan.AddDate(0, 0, 19))
+		report, err := f.renewUC().Execute(context.Background(), 100)
+		if err != nil {
+			t.Fatalf("renew: %v", err)
+		}
+		if report.CanceledForNonpayment != 0 {
+			t.Errorf("CanceledForNonpayment = %d, want 0", report.CanceledForNonpayment)
+		}
+		assertStatus(t, f, subscribed.Subscription.ID, "active")
+	})
+}

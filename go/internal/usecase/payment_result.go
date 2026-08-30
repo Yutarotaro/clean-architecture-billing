@@ -41,7 +41,8 @@ func (u *RecordPaymentResult) Execute(
 		}
 		now := u.clock.Now()
 
-		if notification.Succeeded {
+		switch {
+		case notification.Succeeded:
 			// 二度目以降は MarkPaid が何もしない。冪等性は「呼ぶ側が状態を確認する」
 			// のではなく「呼ばれる側が守る」形にしてある。
 			if err := invoice.MarkPaid(now); err != nil {
@@ -50,8 +51,15 @@ func (u *RecordPaymentResult) Execute(
 			if err := subscription.MarkPaymentSucceeded(now); err != nil {
 				return err
 			}
-		} else if err := subscription.MarkPaymentFailed(now); err != nil {
-			return err
+		case invoice.IsSettled():
+			// 決着済みの請求書に対する失敗通知は、順序が入れ替わって遅れて届いた
+			// 古い通知である。webhook は配信順序を保証しないので、これは異常ではなく
+			// 通常の動作。ここで past_due に落とすと、支払い済みの顧客が「未払い」として
+			// 猶予期間ののちに解約される。
+		default:
+			if err := subscription.MarkPaymentFailed(now); err != nil {
+				return err
+			}
 		}
 
 		if err := uow.Invoices().Save(ctx, invoice); err != nil {
