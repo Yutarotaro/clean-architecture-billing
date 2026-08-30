@@ -6,6 +6,8 @@ webhook は「少なくとも 1 回」しか保証されない。同じ通知が
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from billing.application.charging import UnitOfWorkFactory
@@ -67,13 +69,19 @@ def test_the_same_notification_twice_changes_nothing(
     assert second.status == "paid"
 
 
-def test_a_failure_notification_moves_the_subscription_to_past_due(
-    container: Container,
-) -> None:
+def test_a_stale_failure_notification_is_ignored(container: Container) -> None:
+    """支払い済みの請求書に遅れて届いた失敗通知は、契約に影響しない。
+
+    webhook は配信順序を保証しない。成功のあとに失敗が届くのは異常ではなく通常の
+    動作である。ここで past_due に落とすと、支払い済みの顧客が「未払い」として
+    猶予期間ののちに解約される。請求書は paid のまま、契約だけが canceled になり、
+    どこにも警告は出ない。
+    """
     result = container.subscribe_to_plan.execute(
         SubscribeCommand(customer_id="cus-1", plan_id="basic")
     )
     assert result.invoice is not None
+    assert result.invoice.status == "paid"
     assert result.subscription.status == "active"
 
     container.record_payment_result.execute(
@@ -82,7 +90,31 @@ def test_a_failure_notification_moves_the_subscription_to_past_due(
         )
     )
 
-    assert container.queries.get_subscription(result.subscription.id).status == "past_due"
+    assert container.queries.get_subscription(result.subscription.id).status == "active"
+    assert [invoice.status for invoice in container.queries.list_invoices("cus-1")] == ["paid"]
+
+
+def test_a_stale_failure_notification_does_not_lead_to_cancellation(
+    container: Container, clock: FixedClock
+) -> None:
+    """遅れて届いた失敗通知のあとにバッチを回しても、解約されない。
+
+    これが実際に顧客へ影響が出る経路。past_due になっただけでは気づかれず、
+    14 日後の更新バッチで初めて解約される。
+    """
+    result = container.subscribe_to_plan.execute(
+        SubscribeCommand(customer_id="cus-1", plan_id="basic")
+    )
+    assert result.invoice is not None
+    container.record_payment_result.execute(
+        PaymentNotification(invoice_id=result.invoice.id, succeeded=False)
+    )
+
+    clock.set(datetime(2026, 1, 20, tzinfo=UTC))
+    report = container.renew_due_subscriptions.execute()
+
+    assert report.canceled_for_nonpayment == 0
+    assert container.queries.get_subscription(result.subscription.id).status == "active"
 
 
 def test_a_notification_for_an_unknown_invoice_is_rejected(container: Container) -> None:

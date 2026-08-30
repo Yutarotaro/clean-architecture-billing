@@ -19,6 +19,7 @@ from billing.domain.subscription import Subscription, SubscriptionStatus
 from billing.infrastructure.persistence.dynamo.schema import (
     LIVE_PARTITION,
     PAST_DUE_PARTITION,
+    UNSETTLED_PARTITION,
     customer_invoices_partition,
     invoice_key,
     plan_key,
@@ -117,8 +118,13 @@ def item_to_subscription(item: dict[str, Any]) -> Subscription:
 
 def invoice_to_item(invoice: Invoice, *, version: int) -> dict[str, Any]:
     issued_at = to_iso(invoice.issued_at)
+    # 決着した瞬間に gsi1 のキー属性が消え、索引から自動的に外れる（sparse index）。
+    # 「決着済みを除外する」条件をクエリに書く必要がなくなる。
+    is_unsettled = invoice.status is InvoiceStatus.OPEN
     return _without_none(
         {
+            "gsi1pk": UNSETTLED_PARTITION if is_unsettled else None,
+            "gsi1sk": issued_at if is_unsettled else None,
             **invoice_key(invoice.id),
             "type": "invoice",
             "id": str(invoice.id),

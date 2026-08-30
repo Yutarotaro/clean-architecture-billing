@@ -37,6 +37,12 @@ class RecordPaymentResult:
                 # 状態を確認する」のではなく「呼ばれる側が守る」形にしてある。
                 invoice.mark_paid(at=now)
                 subscription.mark_payment_succeeded(at=now)
+            elif invoice.is_settled:
+                # 決着済みの請求書に対する失敗通知は、順序が入れ替わって遅れて届いた
+                # 古い通知である。webhook は配信順序を保証しないので、これは異常では
+                # なく通常の動作。ここで past_due に落とすと、支払い済みの顧客が
+                # 「未払い」として猶予期間ののちに解約される。
+                pass
             else:
                 subscription.mark_payment_failed(at=now)
 

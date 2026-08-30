@@ -70,6 +70,8 @@ invoices = Table(
     # 二重発行を防ぐ最後の砦がここにあると、競合状態が起きても壊れ方が静かにならない。
     Column("idempotency_key", String(200), nullable=True, unique=True),
     Column("version", Integer, nullable=False, default=1),
+    # 決着していない請求書を拾い直すバッチのための索引。
+    Index("ix_invoices_unsettled", "status", "issued_at"),
 )
 
 invoice_lines = Table(

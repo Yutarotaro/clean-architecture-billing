@@ -55,4 +55,17 @@ class InvoiceRepository(Protocol):
 
     def find_by_idempotency_key(self, key: str) -> Invoice | None: ...
 
+    def list_unsettled(self, *, issued_before: datetime, limit: int = 100) -> list[Invoice]:
+        """``issued_before`` より前に発行され、まだ決着していない請求書を返す。
+
+        決済 API の呼び出しはトランザクションの外で行うため（ADR-0005）、
+        「請求書は発行できたが結果を反映する前にプロセスが落ちる」窓がある。
+        決済代行との通信自体に失敗したときも同じ状態になる。それを後から拾い直す
+        ための入口である。
+
+        ``issued_before`` を取るのは、いま決済中かもしれない請求書を掴まないため。
+        発行から一定時間が経ったものだけを対象にする。
+        """
+        ...
+
     def list_for_customer(self, customer_id: CustomerId) -> list[Invoice]: ...

@@ -136,7 +136,7 @@ class SubscribeResponse(BaseModel):
 class ChangePlanResponse(BaseModel):
     subscription: SubscriptionResponse
     proration: ProrationResponse
-    invoice: InvoiceResponse | None
+    invoice: InvoiceResponse
 
 
 class PaymentWebhookRequest(BaseModel):
@@ -149,9 +149,19 @@ class PaymentWebhookRequest(BaseModel):
 class RenewalReportResponse(BaseModel):
     renewed: int
     invoiced: int
-    payment_failed: int
+    payment_failed: int = Field(description="決済代行がはっきり拒否した件数")
+    charge_unreachable: int = Field(
+        description="決済代行に届かず結果が分からなかった件数。請求書は open のまま残る"
+    )
     terminated: int
     canceled_for_nonpayment: int
+
+
+class SettlementReportResponse(BaseModel):
+    examined: int
+    settled: int
+    declined: int
+    unreachable: int
 
 
 class ErrorResponse(BaseModel):

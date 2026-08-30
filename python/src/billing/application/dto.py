@@ -146,7 +146,8 @@ class SubscribeResult:
 class ChangePlanResult:
     subscription: SubscriptionView
     proration: ProrationView
-    invoice: InvoiceView | None
+    invoice: InvoiceView
+    """プラン変更は差額が 0 以下でも必ず請求書を残すので、常に存在する。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,5 +157,25 @@ class RenewalReport:
     renewed: int = 0
     invoiced: int = 0
     payment_failed: int = 0
+    """決済代行がはっきり拒否した件数。契約は past_due に落ちる。"""
+
+    charge_unreachable: int = 0
+    """決済代行に届かず、結果が分からなかった件数。
+
+    請求書は open のまま残り、SettleUnpaidInvoices が後から拾い直す。
+    拒否（payment_failed）と混ぜてしまうと、通信障害を「未払い」と誤判定して
+    顧客を解約することになる。
+    """
+
     terminated: int = 0
     canceled_for_nonpayment: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SettlementReport:
+    """決済結果の反映漏れを拾い直した結果。"""
+
+    examined: int = 0
+    settled: int = 0
+    declined: int = 0
+    unreachable: int = 0

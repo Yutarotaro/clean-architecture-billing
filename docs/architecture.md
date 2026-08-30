@@ -264,13 +264,15 @@ class Clock(Protocol):
     ```python title="infrastructure/persistence/memory/repositories.py"
     def save(self, subscription: Subscription) -> None:
         entity_id = str(subscription.id)
-        if subscription.id not in self._db.subscriptions:
+        if not self._exists(subscription.id):
             raise UnknownEntity(f"subscription {entity_id!r} does not exist")
         expected = self._versions.expected(entity_id)
-        if self._baseline(entity_id) != expected:
+        # 楽観ロックの判定は、staging ではなくコミット済みの実体に対して行う。
+        committed = self._db.versions.get(entity_id)
+        if committed is not None and committed != expected:
             raise self._versions.conflict(entity_id)
-        self._db.subscriptions[subscription.id] = subscription
-        self._db.versions[entity_id] = self._versions.bump(entity_id)
+        self._staging.subscriptions[subscription.id] = deepcopy(subscription)
+        self._staging.versions[entity_id] = self._versions.bump(entity_id)
     ```
 
 3 つとも「読んだときのバージョンが変わっていないことを条件に書く」という

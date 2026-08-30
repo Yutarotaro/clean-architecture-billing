@@ -60,6 +60,9 @@ CREATE TABLE IF NOT EXISTS invoices (
 
 CREATE INDEX IF NOT EXISTS ix_invoices_customer ON invoices(customer_id, issued_at);
 
+-- 決着していない請求書を拾い直すバッチのための索引。
+CREATE INDEX IF NOT EXISTS ix_invoices_unsettled ON invoices(status, issued_at);
+
 CREATE TABLE IF NOT EXISTS invoice_lines (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     invoice_id  TEXT    NOT NULL REFERENCES invoices(id),

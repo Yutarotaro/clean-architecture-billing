@@ -19,6 +19,7 @@ type Handlers struct {
 	Cancel      *usecase.CancelSubscription
 	RecordPayme *usecase.RecordPaymentResult
 	Renew       *usecase.RenewDueSubscriptions
+	Settle      *usecase.SettleUnpaidInvoices
 	Queries     *usecase.Queries
 	Logger      *slog.Logger
 }
@@ -43,6 +44,7 @@ func NewServer(h Handlers) http.Handler {
 	mux.HandleFunc("GET /customers/{id}/invoices", h.listInvoices)
 	mux.HandleFunc("POST /webhooks/payments", h.recordPayment)
 	mux.HandleFunc("POST /admin/renewals", h.runRenewals)
+	mux.HandleFunc("POST /admin/unpaid-invoices/settlements", h.settleUnpaid)
 
 	return mux
 }
@@ -117,7 +119,7 @@ func (h Handlers) changePlan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, changePlanResponse{
 		Subscription: toSubscriptionJSON(result.Subscription),
 		Proration:    toProrationJSON(result.Proration),
-		Invoice:      toInvoiceJSONPtr(result.Invoice),
+		Invoice:      toInvoiceJSON(result.Invoice),
 	})
 }
 
@@ -171,17 +173,9 @@ func (h Handlers) recordPayment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h Handlers) runRenewals(w http.ResponseWriter, r *http.Request) {
-	limit := 100
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 {
-			writeJSON(w, http.StatusUnprocessableEntity, errorJSON{
-				Error:  "invalid_limit",
-				Detail: "limit must be a positive integer",
-			})
-			return
-		}
-		limit = parsed
+	limit, ok := parseLimit(w, r)
+	if !ok {
+		return
 	}
 	report, err := h.Renew.Execute(r.Context(), limit)
 	if err != nil {
@@ -192,9 +186,49 @@ func (h Handlers) runRenewals(w http.ResponseWriter, r *http.Request) {
 		Renewed:               report.Renewed,
 		Invoiced:              report.Invoiced,
 		PaymentFailed:         report.PaymentFailed,
+		ChargeUnreachable:     report.ChargeUnreachable,
 		Terminated:            report.Terminated,
 		CanceledForNonpayment: report.CanceledForNonpayment,
 	})
+}
+
+// settleUnpaid は発行されたまま決着していない請求書に、もう一度決済を試みる。
+//
+// 決済 API の呼び出しをトランザクションの外に出している以上、結果を反映する前に
+// 落ちる窓は必ず開く。この後始末が存在して初めて、その設計が成立する。
+func (h Handlers) settleUnpaid(w http.ResponseWriter, r *http.Request) {
+	limit, ok := parseLimit(w, r)
+	if !ok {
+		return
+	}
+	report, err := h.Settle.Execute(r.Context(), 0, limit)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, settlementReportJSON{
+		Examined:    report.Examined,
+		Settled:     report.Settled,
+		Declined:    report.Declined,
+		Unreachable: report.Unreachable,
+	})
+}
+
+// parseLimit は limit クエリを読む。省略時は 100。
+func parseLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			writeJSON(w, http.StatusUnprocessableEntity, errorJSON{
+				Error:  "invalid_limit",
+				Detail: "limit must be a positive integer",
+			})
+			return 0, false
+		}
+		limit = parsed
+	}
+	return limit, true
 }
 
 func decode[T any](w http.ResponseWriter, r *http.Request, h Handlers) (T, bool) {

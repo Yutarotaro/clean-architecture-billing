@@ -68,7 +68,7 @@ def change_plan(
     return ChangePlanResponse(
         subscription=SubscriptionResponse.of(result.subscription),
         proration=ProrationResponse.of(result.proration),
-        invoice=None if result.invoice is None else InvoiceResponse.of(result.invoice),
+        invoice=InvoiceResponse.of(result.invoice),
     )
 
 

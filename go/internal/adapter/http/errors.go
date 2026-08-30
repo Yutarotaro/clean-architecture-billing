@@ -25,6 +25,11 @@ func statusFor(err error) (int, string) {
 		return http.StatusConflict, "concurrent_modification"
 	case errors.Is(err, usecase.ErrConflictingRequest):
 		return http.StatusConflict, "conflicting_request"
+	case errors.Is(err, usecase.ErrPaymentGateway):
+		// 決済代行に届かなかった。こちらの落ち度ではないので 500 ではなく 502。
+		// 課金できたかどうかは分からないため請求書は open のまま残っており、
+		// SettleUnpaidInvoices が後から拾い直す。
+		return http.StatusBadGateway, "payment_gateway_unreachable"
 	case errors.Is(err, domain.ErrInvariantViolation),
 		errors.Is(err, domain.ErrCurrencyMismatch):
 		return http.StatusUnprocessableEntity, "domain_rule_violated"

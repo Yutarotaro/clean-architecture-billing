@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -315,3 +316,120 @@ def test_saving_without_reading_is_rejected(seeded: UnitOfWorkFactory) -> None:
     with pytest.raises(ConcurrencyConflict), seeded() as uow:
         uow.subscriptions.save(make_subscription())
         uow.commit()
+
+
+# --------------------------------------------------------- 決着していない請求書
+
+
+def _seed_subscription(uow_factory: UnitOfWorkFactory) -> None:
+    with uow_factory() as uow:
+        uow.subscriptions.add(make_subscription())
+        uow.commit()
+
+
+def test_list_unsettled_returns_only_open_invoices(seeded: UnitOfWorkFactory) -> None:
+    """決着していない請求書だけを返す。
+
+    決済 API の呼び出しはトランザクションの外で行うため、結果を反映する前に
+    プロセスが落ちると請求書が open のまま残る。これはそれを拾い直すための入口。
+    """
+    _seed_subscription(seeded)
+    with seeded() as uow:
+        uow.invoices.add(make_invoice("1", key="a"))
+        paid = make_invoice("2", key="b")
+        paid.mark_paid(at=JAN)
+        uow.invoices.add(paid)
+        uow.commit()
+
+    with seeded() as uow:
+        found = uow.invoices.list_unsettled(issued_before=FEB)
+
+    assert [invoice.id for invoice in found] == ["inv-1"]
+
+
+def test_list_unsettled_excludes_recently_issued_invoices(seeded: UnitOfWorkFactory) -> None:
+    """発行直後のものは掴まない。いま決済中かもしれない。"""
+    _seed_subscription(seeded)
+    with seeded() as uow:
+        uow.invoices.add(make_invoice("1", key="a"))
+        uow.commit()
+
+    with seeded() as uow:
+        found = uow.invoices.list_unsettled(issued_before=JAN - timedelta(seconds=1))
+
+    assert found == []
+
+
+def test_list_unsettled_respects_the_limit(seeded: UnitOfWorkFactory) -> None:
+    _seed_subscription(seeded)
+    with seeded() as uow:
+        for index in range(5):
+            uow.invoices.add(make_invoice(str(index), key=f"key-{index}"))
+        uow.commit()
+
+    with seeded() as uow:
+        assert len(uow.invoices.list_unsettled(issued_before=FEB, limit=3)) == 3
+
+
+def test_settled_invoices_leave_the_unsettled_list(seeded: UnitOfWorkFactory) -> None:
+    """決着させたら次からは拾われない。"""
+    _seed_subscription(seeded)
+    with seeded() as uow:
+        uow.invoices.add(make_invoice("1", key="a"))
+        uow.commit()
+
+    with seeded() as uow:
+        invoice = uow.invoices.get(InvoiceId("inv-1"))
+        assert invoice is not None
+        invoice.mark_paid(at=JAN)
+        uow.invoices.save(invoice)
+        uow.commit()
+
+    with seeded() as uow:
+        assert uow.invoices.list_unsettled(issued_before=FEB) == []
+
+
+def test_committing_does_not_clobber_untouched_aggregates(seeded: UnitOfWorkFactory) -> None:
+    """自分が触っていない集約への、他トランザクションの更新を巻き戻さない。
+
+    楽観ロックは「触った集約」のバージョンしか見ない。commit がデータベース全体を
+    作業コピーで置き換える実装だと、触っていない集約への更新は検査を素通りして消える。
+    しかも誰にも検出されない。
+
+    これはインメモリ実装だけが持っていた欠陥だった。既存の
+    ``test_concurrent_update_is_detected`` は同一の集約しか競合させていないため
+    見逃していた。
+
+    後から書く側の commit が通るかどうかは実装によって違う。WAL モードの SQLite は
+    「読んだ時点のスナップショットが古い」ことを検出し、触っていない集約が動いた
+    だけでも書き込みを拒む。それは安全側の失敗なので許容する。契約として要求するのは
+    「sub-2 の更新が失われないこと」だけである。
+    """
+    with seeded() as uow:
+        uow.subscriptions.add(make_subscription("1"))
+        uow.subscriptions.add(make_subscription("2"))
+        uow.commit()
+
+    with seeded() as outer:
+        # outer は sub-1 だけを読む。sub-2 には一切触れない。
+        target = outer.subscriptions.get(SubscriptionId("sub-1"))
+        assert target is not None
+
+        with seeded() as inner:
+            other = inner.subscriptions.get(SubscriptionId("sub-2"))
+            assert other is not None
+            other.cancel(at=JAN, immediately=True)
+            inner.subscriptions.save(other)
+            inner.commit()
+
+        target.cancel(at=JAN, immediately=True)
+        with suppress(ConcurrencyConflict):
+            outer.subscriptions.save(target)
+            outer.commit()
+
+    with seeded() as uow:
+        untouched = uow.subscriptions.get(SubscriptionId("sub-2"))
+        assert untouched is not None
+        assert untouched.status is SubscriptionStatus.CANCELED, (
+            "触っていない集約への更新が巻き戻された"
+        )

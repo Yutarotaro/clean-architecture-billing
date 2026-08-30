@@ -19,6 +19,7 @@ from billing.infrastructure.persistence.dynamo.schema import (
     GSI2,
     LIVE_PARTITION,
     PAST_DUE_PARTITION,
+    UNSETTLED_PARTITION,
     customer_invoices_partition,
     idempotency_key,
     invoice_key,
@@ -196,6 +197,18 @@ class DynamoInvoiceRepository:
         if invoice_id is None:
             raise DuplicateEntity(f"idempotency item {key!r} has no invoice_id")
         return self.get(InvoiceId(str(invoice_id)))
+
+    def list_unsettled(self, *, issued_before: datetime, limit: int = 100) -> list[Invoice]:
+        items = self._session.query(
+            index=GSI1,
+            key_condition="gsi1pk = :unsettled AND gsi1sk <= :before",
+            values={
+                ":unsettled": UNSETTLED_PARTITION,
+                ":before": require_iso(issued_before, field="issued_before"),
+            },
+            limit=limit,
+        )
+        return [self._track(item) for item in items]
 
     def list_for_customer(self, customer_id: CustomerId) -> list[Invoice]:
         items = self._session.query(

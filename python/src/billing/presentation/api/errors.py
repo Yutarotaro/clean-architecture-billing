@@ -16,6 +16,7 @@ from billing.application.errors import (
     ConflictingRequest,
     EntityNotFound,
 )
+from billing.application.ports import PaymentGatewayError
 from billing.domain.errors import DomainError, IllegalTransition
 
 
@@ -37,6 +38,13 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ConflictingRequest)
     async def _conflicting(_: Request, exc: ConflictingRequest) -> JSONResponse:
         return _error(409, "conflicting_request", str(exc))
+
+    @app.exception_handler(PaymentGatewayError)
+    async def _payment_gateway(_: Request, exc: PaymentGatewayError) -> JSONResponse:
+        # 決済代行に届かなかった。こちらの落ち度ではないので 500 ではなく 502。
+        # 課金できたかどうかは分からないため、請求書は open のまま残っており、
+        # SettleUnpaidInvoices が後から拾い直す。
+        return _error(502, "payment_gateway_unreachable", str(exc))
 
     @app.exception_handler(DomainError)
     async def _domain_error(_: Request, exc: DomainError) -> JSONResponse:

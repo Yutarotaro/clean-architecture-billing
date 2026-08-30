@@ -141,6 +141,8 @@ func Build(ctx context.Context, cfg Config, opts ...Option) (*Container, error) 
 		RecordPayme: usecase.NewRecordPaymentResult(container.Factory, container.Clock),
 		Renew: usecase.NewRenewDueSubscriptions(
 			container.Factory, container.Clock, container.IDs, container.Gateway),
+		Settle: usecase.NewSettleUnpaidInvoices(
+			container.Factory, container.Clock, container.Gateway),
 		Queries: usecase.NewQueries(container.Factory),
 		Logger:  resolved.logger,
 	}

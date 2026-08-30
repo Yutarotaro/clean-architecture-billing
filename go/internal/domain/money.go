@@ -75,9 +75,12 @@ func (m Money) Scale(ratio *big.Rat) (Money, error) {
 		return Money{}, Invalid("ratio must not be negative, got %s", ratio.String())
 	}
 	scaled := new(big.Rat).Mul(new(big.Rat).SetInt64(m.Amount), ratio)
-	// big.Int の Quo は 0 方向への切り捨て。金額は常に非負で使うため floor と一致する。
-	truncated := new(big.Int).Quo(scaled.Num(), scaled.Denom())
-	return Money{Amount: truncated.Int64(), Currency: m.Currency}, nil
+	// Quo（0 方向への切り捨て）ではなく Div（floor）を使う。分母は常に正なので
+	// Div は floor と一致する。負の金額で Quo を使うと Python 側の // と結果が
+	// 割れる（-1000 * 1/3 が Quo では -333、floor では -334）。同じ入力に対して
+	// 言語ごとに違う金額が出るのは、それだけで不具合である。
+	floored := new(big.Int).Div(scaled.Num(), scaled.Denom())
+	return Money{Amount: floored.Int64(), Currency: m.Currency}, nil
 }
 
 func (m Money) String() string {

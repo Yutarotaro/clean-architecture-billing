@@ -9,7 +9,7 @@ from sqlalchemy import Connection, and_, select
 from sqlalchemy.exc import IntegrityError
 
 from billing.domain.ids import CustomerId, InvoiceId, PlanId, SubscriptionId
-from billing.domain.invoice import Invoice
+from billing.domain.invoice import Invoice, InvoiceStatus
 from billing.domain.plan import Plan
 from billing.domain.subscription import Subscription, SubscriptionStatus
 from billing.infrastructure.persistence.errors import DuplicateEntity
@@ -176,6 +176,22 @@ class SqlInvoiceRepository:
             return None
         self._versions.remember(row.id, row.version)
         return self._hydrate(row)
+
+    def list_unsettled(self, *, issued_before: datetime, limit: int = 100) -> list[Invoice]:
+        rows = self._conn.execute(
+            select(invoices)
+            .where(
+                and_(
+                    invoices.c.status == str(InvoiceStatus.OPEN),
+                    invoices.c.issued_at <= to_iso(issued_before),
+                )
+            )
+            .order_by(invoices.c.issued_at, invoices.c.id)
+            .limit(limit)
+        ).all()
+        for row in rows:
+            self._versions.remember(row.id, row.version)
+        return [self._hydrate(row) for row in rows]
 
     def list_for_customer(self, customer_id: CustomerId) -> list[Invoice]:
         rows = self._conn.execute(

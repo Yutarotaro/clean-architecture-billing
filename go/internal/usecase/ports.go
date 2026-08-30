@@ -39,6 +39,9 @@ type ChargeRequest struct {
 }
 
 // PaymentGateway は決済代行。Stripe でも PAY.JP でも、この形に合わせて実装を書く。
+//
+// 通信自体に失敗したときは ErrPaymentGateway を包んだエラーを返すこと。
+// adapter の責任で、HTTP クライアントのエラーをこれに翻訳する。
 type PaymentGateway interface {
 	Charge(ctx context.Context, req ChargeRequest) (PaymentResult, error)
 }
@@ -73,6 +76,14 @@ type InvoiceRepository interface {
 	Add(ctx context.Context, invoice *domain.Invoice) error
 	Save(ctx context.Context, invoice *domain.Invoice) error
 	FindByIdempotencyKey(ctx context.Context, key string) (*domain.Invoice, error)
+	// ListUnsettled は issuedBefore より前に発行され、まだ決着していない請求書を返す。
+	//
+	// 決済 API の呼び出しはトランザクションの外で行うため（ADR-0005）、「請求書は
+	// 発行できたが結果を反映する前にプロセスが落ちる」窓がある。決済代行との通信自体に
+	// 失敗したときも同じ状態になる。それを後から拾い直すための入口である。
+	//
+	// issuedBefore を取るのは、いま決済中かもしれない請求書を掴まないため。
+	ListUnsettled(ctx context.Context, issuedBefore time.Time, limit int) ([]*domain.Invoice, error)
 	ListForCustomer(ctx context.Context, id domain.CustomerID) ([]*domain.Invoice, error)
 }
 

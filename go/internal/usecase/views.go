@@ -123,9 +123,23 @@ func prorationView(p domain.Proration) (ProrationView, error) {
 
 // RenewalReport はバッチ 1 回ぶんの結果。
 type RenewalReport struct {
-	Renewed               int
-	Invoiced              int
-	PaymentFailed         int
+	Renewed  int
+	Invoiced int
+	// PaymentFailed は決済代行がはっきり拒否した件数。契約は past_due に落ちる。
+	PaymentFailed int
+	// ChargeUnreachable は決済代行に届かず、結果が分からなかった件数。
+	//
+	// 請求書は open のまま残り、SettleUnpaidInvoices が後から拾い直す。拒否と
+	// 混ぜてしまうと、通信障害を「未払い」と誤判定して顧客を解約することになる。
+	ChargeUnreachable     int
 	Terminated            int
 	CanceledForNonpayment int
+}
+
+// SettlementReport は決済結果の反映漏れを拾い直した結果。
+type SettlementReport struct {
+	Examined    int
+	Settled     int
+	Declined    int
+	Unreachable int
 }

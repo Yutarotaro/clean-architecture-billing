@@ -54,6 +54,25 @@ def test_remaining_ratio(at: datetime, expected: Fraction) -> None:
     assert BillingPeriod(JAN, FEB).remaining_ratio(at) == expected
 
 
+def test_remaining_ratio_is_exact_for_sub_second_periods() -> None:
+    """マイクロ秒の端数を持つ期間でも、比率が厳密であること。
+
+    ``timedelta.total_seconds()`` は float を返すので、そこを経由すると 1μ秒ぶん
+    ずれる。金額に化けるのは丸めの境界に乗ったときだけなので、テストで固定しておく。
+    """
+    start = datetime(2024, 2, 16, 22, 22, 56, 730_795, tzinfo=UTC)
+    end = datetime(2024, 9, 2, 17, 11, 42, 136_530, tzinfo=UTC)
+    at = datetime(2024, 5, 24, 17, 39, 38, 811_523, tzinfo=UTC)
+
+    ratio = BillingPeriod(start, end).remaining_ratio(at)
+
+    expected = Fraction(
+        (end - at) // timedelta(microseconds=1),
+        (end - start) // timedelta(microseconds=1),
+    )
+    assert ratio == expected
+
+
 def test_proration_credits_the_unused_part_and_charges_the_new_plan() -> None:
     """1 月の折り返し地点で 1,000 円プランから 3,000 円プランへ変えた場合。
 

@@ -270,3 +270,127 @@ func TestEveryPastDueSubscriptionIsExpiredIndependently(t *testing.T) {
 		}
 	})
 }
+
+// 1 件の決済が通信失敗しても、残りの契約は処理される。
+//
+// ここでエラーが上まで抜けると被害が二重になる。この契約より後ろが処理されず、しかも
+// 更新自体は commit 済みなので次回の実行では IsDue が偽になり、発行済みの請求書を
+// 誰も拾わなくなる。契約は active のままなのでサービスは提供され続け、静かに売上が消える。
+func TestAGatewayOutageDoesNotStopTheBatch(t *testing.T) {
+	eachBackend(t, func(t *testing.T, factory usecase.UnitOfWorkFactory) {
+		f := newFixture(t, factory)
+		for _, customer := range []string{"cus-0", "cus-1", "cus-2"} {
+			f.subscribe(t, "basic", customer)
+		}
+
+		// 更新のタイミングで、1 件だけ決済代行に届かなくする。
+		f.gateway.SetFail(func(req usecase.ChargeRequest) bool {
+			return req.CustomerID == "cus-0"
+		})
+		f.clock.Set(feb)
+
+		report, err := f.renewUC().Execute(context.Background(), 100)
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+
+		if report.Renewed != 3 {
+			t.Errorf("Renewed = %d, want 3", report.Renewed)
+		}
+		if report.Invoiced != 3 {
+			t.Errorf("Invoiced = %d, want 3", report.Invoiced)
+		}
+		if report.ChargeUnreachable != 1 {
+			t.Errorf("ChargeUnreachable = %d, want 1", report.ChargeUnreachable)
+		}
+		// 「届かなかった」を「拒否された」と混ぜない。混ぜると通信障害で顧客が解約される。
+		if report.PaymentFailed != 0 {
+			t.Errorf("PaymentFailed = %d, want 0", report.PaymentFailed)
+		}
+	})
+}
+
+// 通信失敗で取り残された請求書を、あとから拾い直せる。
+//
+// 決済 API の呼び出しをトランザクションの外に出している以上、結果を反映する前に
+// 落ちる窓は必ず開く。この後始末が存在して初めて、その設計が成立する。
+func TestUnsettledInvoicesAreSettledLater(t *testing.T) {
+	eachBackend(t, func(t *testing.T, factory usecase.UnitOfWorkFactory) {
+		f := newFixture(t, factory)
+		subscribed := f.subscribe(t, "basic", "cus-1")
+
+		f.gateway.SetFail(func(usecase.ChargeRequest) bool { return true })
+		f.clock.Set(feb)
+		report, err := f.renewUC().Execute(context.Background(), 100)
+		if err != nil {
+			t.Fatalf("renew: %v", err)
+		}
+		if report.ChargeUnreachable != 1 {
+			t.Fatalf("ChargeUnreachable = %d, want 1", report.ChargeUnreachable)
+		}
+		assertInvoiceStatuses(t, f, "cus-1", []string{"paid", "open"})
+
+		// 決済代行が復旧した。
+		f.gateway.SetFail(nil)
+		f.clock.Set(feb.Add(time.Hour))
+		settlement, err := f.settleUC().Execute(context.Background(), 0, 100)
+		if err != nil {
+			t.Fatalf("settle: %v", err)
+		}
+
+		if settlement.Examined != 1 || settlement.Settled != 1 {
+			t.Errorf("settlement = %+v, want examined=1 settled=1", settlement)
+		}
+		assertInvoiceStatuses(t, f, "cus-1", []string{"paid", "paid"})
+		assertStatus(t, f, subscribed.Subscription.ID, "active")
+		if got := f.gateway.SettledAmount(); got != 2_000 {
+			t.Errorf("settled amount = %d, want 2000", got)
+		}
+	})
+}
+
+// 発行直後の請求書は掴まない。いま決済中かもしれない。
+func TestSettlementIgnoresInvoicesThatMayStillBeInFlight(t *testing.T) {
+	eachBackend(t, func(t *testing.T, factory usecase.UnitOfWorkFactory) {
+		f := newFixture(t, factory)
+		f.subscribe(t, "basic", "cus-1")
+
+		f.gateway.SetFail(func(usecase.ChargeRequest) bool { return true })
+		f.clock.Set(feb)
+		if _, err := f.renewUC().Execute(context.Background(), 100); err != nil {
+			t.Fatalf("renew: %v", err)
+		}
+
+		f.gateway.SetFail(nil)
+		// まだ 15 分経っていない。
+		f.clock.Set(feb.Add(5 * time.Minute))
+		settlement, err := f.settleUC().Execute(context.Background(), 0, 100)
+		if err != nil {
+			t.Fatalf("settle: %v", err)
+		}
+		if settlement.Examined != 0 {
+			t.Errorf("Examined = %d, want 0", settlement.Examined)
+		}
+	})
+}
+
+func assertInvoiceStatuses(t *testing.T, f *fixture, customerID string, want []string) {
+	t.Helper()
+	views, err := f.queries().ListInvoices(context.Background(), customerID)
+	if err != nil {
+		t.Fatalf("ListInvoices: %v", err)
+	}
+	got := make([]string, 0, len(views))
+	for _, view := range views {
+		got = append(got, view.Status)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("invoice statuses = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("invoice statuses = %v, want %v", got, want)
+			return
+		}
+	}
+}
