@@ -40,7 +40,23 @@ def test_amount_must_be_an_integer_in_minor_units() -> None:
         (1_000, Fraction(1), 1_000),
     ],
 )
-def test_scale_truncates_towards_zero(amount: int, ratio: Fraction, expected: int) -> None:
+def test_scale_floors(amount: int, ratio: Fraction, expected: int) -> None:
+    assert Money(amount).scale(ratio) == Money(expected)
+
+
+@pytest.mark.parametrize(
+    ("amount", "ratio", "expected"),
+    [
+        # 負の金額でも floor で丸める。Go 版と結果を揃えるための取り決め。
+        # 0 方向への切り捨て（truncate）だと -333 になり、言語ごとに違う金額が出る。
+        (-1_000, Fraction(1, 3), -334),
+        (-1_000, Fraction(2, 3), -667),
+        (-999, Fraction(1, 2), -500),
+        (-3_000, Fraction(1, 2), -1_500),
+    ],
+)
+def test_scale_of_a_negative_amount_floors(amount: int, ratio: Fraction, expected: int) -> None:
+    """負の金額の丸め方向。プラン変更の明細では credit を負で持つため実際に通る。"""
     assert Money(amount).scale(ratio) == Money(expected)
 
 

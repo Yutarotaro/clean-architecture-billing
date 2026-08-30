@@ -44,7 +44,7 @@ func TestNewMoneyValidatesCurrency(t *testing.T) {
 	}
 }
 
-func TestMoneyScaleTruncates(t *testing.T) {
+func TestMoneyScaleFloors(t *testing.T) {
 	tests := []struct {
 		name   string
 		amount int64
@@ -68,6 +68,33 @@ func TestMoneyScaleTruncates(t *testing.T) {
 			}
 			if got.Amount != tt.want {
 				t.Errorf("Scale(%s) = %d, want %d", tt.ratio, got.Amount, tt.want)
+			}
+		})
+	}
+}
+
+// 負の金額でも floor で丸める。Python 側の // と結果を揃えるための取り決め。
+// 0 方向への切り捨て（Quo）だと -333 になり、言語ごとに違う金額が出る。
+func TestMoneyScaleOfANegativeAmountFloors(t *testing.T) {
+	tests := []struct {
+		name   string
+		amount int64
+		ratio  *big.Rat
+		want   int64
+	}{
+		{"third", -1_000, big.NewRat(1, 3), -334},
+		{"two thirds", -1_000, big.NewRat(2, 3), -667},
+		{"odd half", -999, big.NewRat(1, 2), -500},
+		{"clean half", -3_000, big.NewRat(1, 2), -1_500},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := domain.JPY(tt.amount).Scale(tt.ratio)
+			if err != nil {
+				t.Fatalf("Scale: %v", err)
+			}
+			if got.Amount != tt.want {
+				t.Errorf("Scale(%d, %s) = %d, want %d", tt.amount, tt.ratio, got.Amount, tt.want)
 			}
 		})
 	}

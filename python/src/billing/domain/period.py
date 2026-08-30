@@ -11,6 +11,15 @@ from billing.domain.plan import BillingInterval
 from billing.domain.time import ensure_aware
 
 
+def _microseconds(delta: timedelta) -> int:
+    """``timedelta`` を整数のマイクロ秒に変換する。
+
+    ``total_seconds()`` は float を返すため、大きな期間や μ秒の端数で精度が落ちる。
+    日・秒・マイクロ秒はいずれも整数で保持されているので、そこから組み立てれば厳密。
+    """
+    return delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
+
+
 @dataclass(frozen=True, slots=True)
 class BillingPeriod:
     """``[start, end)`` の半開区間。終端は含まない。
@@ -49,15 +58,15 @@ class BillingPeriod:
     def remaining_ratio(self, at: datetime) -> Fraction:
         """``at`` の時点で残っている期間の割合を厳密な分数で返す。
 
-        float を経由しない。1/3 のような比率を float にすると、掛けたあとの丸めが
-        処理系依存になり、テストが「なぜか 1 円ずれる」形で落ちるようになる。
+        float を一度も経由しない。``timedelta.total_seconds()`` は float を返すので、
+        マイクロ秒の端数を持つ期間では往復で 1μ秒ぶんずれる。1/3 のような比率を
+        float にすると、掛けたあとの丸めが処理系依存になり、テストが「なぜか 1 円
+        ずれる」形で落ちるようになる。``timedelta`` が内部に持つ日・秒・マイクロ秒は
+        すべて整数なので、そこから直接組み立てる。
         """
         at = ensure_aware(at, field="at")
         if at <= self.start:
             return Fraction(1)
         if at >= self.end:
             return Fraction(0)
-        return Fraction(
-            int((self.end - at).total_seconds() * 1_000_000),
-            int(self.duration.total_seconds() * 1_000_000),
-        )
+        return Fraction(_microseconds(self.end - at), _microseconds(self.duration))
