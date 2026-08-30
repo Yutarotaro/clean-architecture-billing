@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from billing.application.charging import UnitOfWorkFactory, charge_invoice
 from billing.application.dto import RenewalReport
 from billing.application.errors import EntityNotFound
-from billing.application.ports import Clock, IdGenerator, PaymentGateway
+from billing.application.ports import Clock, IdGenerator, PaymentGateway, PaymentGatewayError
 from billing.domain.ids import InvoiceId, SubscriptionId
 from billing.domain.invoice import Invoice, InvoiceLine
 
@@ -42,7 +42,7 @@ class RenewDueSubscriptions:
 
     def execute(self, *, limit: int = 100) -> RenewalReport:
         now = self._clock.now()
-        renewed = invoiced = payment_failed = terminated = 0
+        renewed = invoiced = payment_failed = charge_unreachable = terminated = 0
 
         with self._uow_factory() as uow:
             due_ids = [s.id for s in uow.subscriptions.list_due(now, limit=limit)]
@@ -56,12 +56,21 @@ class RenewDueSubscriptions:
             if outcome.invoice_id is None:
                 continue
             invoiced += 1
-            charge = charge_invoice(
-                uow_factory=self._uow_factory,
-                gateway=self._gateway,
-                clock=self._clock,
-                invoice_id=outcome.invoice_id,
-            )
+            try:
+                charge = charge_invoice(
+                    uow_factory=self._uow_factory,
+                    gateway=self._gateway,
+                    clock=self._clock,
+                    invoice_id=outcome.invoice_id,
+                )
+            except PaymentGatewayError:
+                # 決済代行に届かず、課金できたかどうかが分からない。請求書は open の
+                # まま残る。ここでバッチ全体を止めると、この契約より後ろが処理されず、
+                # しかも更新はすでに commit 済みなので次回の実行では is_due が偽になり、
+                # 取り残された請求書を誰も拾わなくなる。1 件の失敗は 1 件に留め、
+                # SettleUnpaidInvoices が後から拾い直す。
+                charge_unreachable += 1
+                continue
             if not charge.result.succeeded:
                 payment_failed += 1
 
@@ -69,6 +78,7 @@ class RenewDueSubscriptions:
             renewed=renewed,
             invoiced=invoiced,
             payment_failed=payment_failed,
+            charge_unreachable=charge_unreachable,
             terminated=terminated,
             canceled_for_nonpayment=self._expire_past_due(limit=limit),
         )

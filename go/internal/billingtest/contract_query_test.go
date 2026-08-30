@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/Yutarotaro/clean-architecture-billing/go/internal/domain"
 	"github.com/Yutarotaro/clean-architecture-billing/go/internal/infra/storage"
@@ -403,6 +404,130 @@ func idsOf(subscriptions []*domain.Subscription) []domain.SubscriptionID {
 	found := make([]domain.SubscriptionID, 0, len(subscriptions))
 	for _, s := range subscriptions {
 		found = append(found, s.ID)
+	}
+	return found
+}
+
+// 決着していない請求書だけを返す。
+//
+// 決済 API の呼び出しはトランザクションの外で行うため、結果を反映する前にプロセスが
+// 落ちると請求書が open のまま残る。これはそれを拾い直すための入口。
+func TestListUnsettledReturnsOnlyOpenInvoices(t *testing.T) {
+	eachBackend(t, func(t *testing.T, factory usecase.UnitOfWorkFactory) {
+		seedPlans(t, factory)
+		ctx := context.Background()
+
+		withTx(t, factory, func(uow usecase.UnitOfWork) {
+			if err := uow.Subscriptions().Add(ctx, makeSubscription(t, "1", jan)); err != nil {
+				t.Fatalf("Add: %v", err)
+			}
+			if err := uow.Invoices().Add(ctx, makeInvoice(t, "1", "a")); err != nil {
+				t.Fatalf("Add invoice: %v", err)
+			}
+			paid := makeInvoice(t, "2", "b")
+			if err := paid.MarkPaid(jan); err != nil {
+				t.Fatalf("MarkPaid: %v", err)
+			}
+			if err := uow.Invoices().Add(ctx, paid); err != nil {
+				t.Fatalf("Add invoice: %v", err)
+			}
+			if err := uow.Commit(); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+		})
+
+		withTx(t, factory, func(uow usecase.UnitOfWork) {
+			found, err := uow.Invoices().ListUnsettled(ctx, feb, 100)
+			if err != nil {
+				t.Fatalf("ListUnsettled: %v", err)
+			}
+			if len(found) != 1 || found[0].ID != "inv-1" {
+				t.Errorf("ListUnsettled = %v, want [inv-1]", invoiceIDsOf(found))
+			}
+		})
+	})
+}
+
+// 発行直後のものは掴まない。いま決済中かもしれない。
+func TestListUnsettledExcludesRecentlyIssued(t *testing.T) {
+	eachBackend(t, func(t *testing.T, factory usecase.UnitOfWorkFactory) {
+		seedPlans(t, factory)
+		ctx := context.Background()
+
+		withTx(t, factory, func(uow usecase.UnitOfWork) {
+			if err := uow.Subscriptions().Add(ctx, makeSubscription(t, "1", jan)); err != nil {
+				t.Fatalf("Add: %v", err)
+			}
+			if err := uow.Invoices().Add(ctx, makeInvoice(t, "1", "a")); err != nil {
+				t.Fatalf("Add invoice: %v", err)
+			}
+			if err := uow.Commit(); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+		})
+
+		withTx(t, factory, func(uow usecase.UnitOfWork) {
+			found, err := uow.Invoices().ListUnsettled(ctx, jan.Add(-time.Second), 100)
+			if err != nil {
+				t.Fatalf("ListUnsettled: %v", err)
+			}
+			if len(found) != 0 {
+				t.Errorf("ListUnsettled = %v, want empty", invoiceIDsOf(found))
+			}
+		})
+	})
+}
+
+// 決着させたら次からは拾われない。
+func TestSettledInvoicesLeaveTheUnsettledList(t *testing.T) {
+	eachBackend(t, func(t *testing.T, factory usecase.UnitOfWorkFactory) {
+		seedPlans(t, factory)
+		ctx := context.Background()
+
+		withTx(t, factory, func(uow usecase.UnitOfWork) {
+			if err := uow.Subscriptions().Add(ctx, makeSubscription(t, "1", jan)); err != nil {
+				t.Fatalf("Add: %v", err)
+			}
+			if err := uow.Invoices().Add(ctx, makeInvoice(t, "1", "a")); err != nil {
+				t.Fatalf("Add invoice: %v", err)
+			}
+			if err := uow.Commit(); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+		})
+
+		withTx(t, factory, func(uow usecase.UnitOfWork) {
+			invoice, err := uow.Invoices().Get(ctx, "inv-1")
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if err := invoice.MarkPaid(jan); err != nil {
+				t.Fatalf("MarkPaid: %v", err)
+			}
+			if err := uow.Invoices().Save(ctx, invoice); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			if err := uow.Commit(); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+		})
+
+		withTx(t, factory, func(uow usecase.UnitOfWork) {
+			found, err := uow.Invoices().ListUnsettled(ctx, feb, 100)
+			if err != nil {
+				t.Fatalf("ListUnsettled: %v", err)
+			}
+			if len(found) != 0 {
+				t.Errorf("ListUnsettled = %v, want empty", invoiceIDsOf(found))
+			}
+		})
+	})
+}
+
+func invoiceIDsOf(invoices []*domain.Invoice) []domain.InvoiceID {
+	found := make([]domain.InvoiceID, 0, len(invoices))
+	for _, invoice := range invoices {
+		found = append(found, invoice.ID)
 	}
 	return found
 }

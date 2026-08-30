@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/Yutarotaro/clean-architecture-billing/go/internal/domain"
+	"github.com/Yutarotaro/clean-architecture-billing/go/internal/infra/storage"
 )
 
 const invoiceColumns = `id, customer_id, subscription_id, status, currency,
@@ -90,6 +92,20 @@ func (r *invoiceRepo) FindByIdempotencyKey(
 	return invoice, err
 }
 
+func (r *invoiceRepo) ListUnsettled(
+	ctx context.Context, issuedBefore time.Time, limit int,
+) ([]*domain.Invoice, error) {
+	rows, err := r.tx.QueryContext(ctx,
+		`SELECT `+invoiceColumns+` FROM invoices
+		 WHERE status = ? AND issued_at <= ?
+		 ORDER BY issued_at, id LIMIT ?`,
+		string(domain.InvoiceOpen), storage.FormatTime(issuedBefore), limit)
+	if err != nil {
+		return nil, err
+	}
+	return r.collect(ctx, rows)
+}
+
 func (r *invoiceRepo) ListForCustomer(
 	ctx context.Context, id domain.CustomerID,
 ) ([]*domain.Invoice, error) {
@@ -99,8 +115,11 @@ func (r *invoiceRepo) ListForCustomer(
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	return r.collect(ctx, rows)
+}
 
+func (r *invoiceRepo) collect(ctx context.Context, rows *sql.Rows) ([]*domain.Invoice, error) {
+	defer func() { _ = rows.Close() }()
 	var found []*domain.Invoice
 	for rows.Next() {
 		invoice, err := r.scan(ctx, rows)

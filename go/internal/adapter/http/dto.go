@@ -145,11 +145,21 @@ type paymentWebhookRequest struct {
 }
 
 type renewalReportJSON struct {
-	Renewed               int `json:"renewed"`
-	Invoiced              int `json:"invoiced"`
-	PaymentFailed         int `json:"payment_failed"`
+	Renewed  int `json:"renewed"`
+	Invoiced int `json:"invoiced"`
+	// PaymentFailed は決済代行がはっきり拒否した件数。
+	PaymentFailed int `json:"payment_failed"`
+	// ChargeUnreachable は決済代行に届かず結果が分からなかった件数。請求書は open のまま。
+	ChargeUnreachable     int `json:"charge_unreachable"`
 	Terminated            int `json:"terminated"`
 	CanceledForNonpayment int `json:"canceled_for_nonpayment"`
+}
+
+type settlementReportJSON struct {
+	Examined    int `json:"examined"`
+	Settled     int `json:"settled"`
+	Declined    int `json:"declined"`
+	Unreachable int `json:"unreachable"`
 }
 
 type errorJSON struct {

@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from billing.domain.ids import CustomerId, InvoiceId, PlanId, SubscriptionId
-from billing.domain.invoice import Invoice
+from billing.domain.invoice import Invoice, InvoiceStatus
 from billing.domain.plan import Plan
 from billing.domain.subscription import Subscription, SubscriptionStatus
 from billing.infrastructure.persistence.errors import DuplicateEntity, UnknownEntity
@@ -142,6 +142,20 @@ class InMemoryInvoiceRepository:
                 self._versions.remember(str(invoice.id), self._db.versions[str(invoice.id)])
                 return invoice
         return None
+
+    def list_unsettled(self, *, issued_before: datetime, limit: int = 100) -> list[Invoice]:
+        found = [
+            invoice
+            for invoice in self._db.invoices.values()
+            if invoice.status is InvoiceStatus.OPEN
+            and invoice.issued_at is not None
+            and invoice.issued_at <= issued_before
+        ]
+        found.sort(key=lambda invoice: (invoice.issued_at or datetime.min, invoice.id))
+        selected = found[:limit]
+        for invoice in selected:
+            self._versions.remember(str(invoice.id), self._db.versions[str(invoice.id)])
+        return selected
 
     def list_for_customer(self, customer_id: CustomerId) -> list[Invoice]:
         found = [i for i in self._db.invoices.values() if i.customer_id == customer_id]

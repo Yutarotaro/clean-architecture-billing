@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -62,7 +63,16 @@ func (u *RenewDueSubscriptions) Execute(ctx context.Context, limit int) (Renewal
 		report.Invoiced++
 		outcome, err := chargeInvoice(ctx, u.factory, u.gateway, u.clock, invoiceID)
 		if err != nil {
-			return RenewalReport{}, err
+			if !errors.Is(err, ErrPaymentGateway) {
+				return RenewalReport{}, err
+			}
+			// 決済代行に届かず、課金できたかどうかが分からない。請求書は open のまま
+			// 残る。ここでバッチ全体を止めると、この契約より後ろが処理されず、しかも
+			// 更新はすでに commit 済みなので次回は IsDue が偽になり、取り残された
+			// 請求書を誰も拾わなくなる。1 件の失敗は 1 件に留め、
+			// SettleUnpaidInvoices が後から拾い直す。
+			report.ChargeUnreachable++
+			continue
 		}
 		if !outcome.Result.Succeeded {
 			report.PaymentFailed++

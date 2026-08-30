@@ -134,6 +134,10 @@ func (f *fixture) renewUC() *usecase.RenewDueSubscriptions {
 	return usecase.NewRenewDueSubscriptions(f.factory, f.clock, f.ids, f.gateway)
 }
 
+func (f *fixture) settleUC() *usecase.SettleUnpaidInvoices {
+	return usecase.NewSettleUnpaidInvoices(f.factory, f.clock, f.gateway)
+}
+
 func (f *fixture) queries() *usecase.Queries {
 	return usecase.NewQueries(f.factory)
 }

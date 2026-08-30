@@ -171,9 +171,20 @@ def test_admin_renewals(client: TestClient, clock: FixedClock) -> None:
         "renewed": 1,
         "invoiced": 1,
         "payment_failed": 0,
+        "charge_unreachable": 0,
         "terminated": 0,
         "canceled_for_nonpayment": 0,
     }
+
+
+def test_admin_settlements(client: TestClient) -> None:
+    """拾い直しの入口が存在すること。何も残っていなければ 0 件。"""
+    subscribe(client)
+
+    response = client.post("/admin/unpaid-invoices/settlements")
+
+    assert response.status_code == 200
+    assert response.json() == {"examined": 0, "settled": 0, "declined": 0, "unreachable": 0}
 
 
 def test_openapi_is_generated(client: TestClient) -> None:

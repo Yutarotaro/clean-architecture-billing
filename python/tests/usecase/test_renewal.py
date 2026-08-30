@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from billing.application.charging import UnitOfWorkFactory
 from billing.application.dto import CancelCommand, SubscribeCommand
@@ -109,13 +109,13 @@ def test_failed_renewal_moves_to_past_due_then_cancels_after_the_grace_period(
     uow_factory: UnitOfWorkFactory, clock: FixedClock, ids: SequentialIdGenerator
 ) -> None:
     """支払い失敗 → 猶予 14 日 → 自動解約、までを時計だけで再現する。"""
-    gateway = FakePaymentGateway(decline_when=lambda attempt: attempt.description.endswith("sub"))
+    gateway = FakePaymentGateway()
     container = Container(uow_factory=uow_factory, clock=clock, ids=ids, gateway=gateway)
     container.seed_plans()
     subscription_id = subscribe(container)
 
-    # 2 月の更新で決済が失敗するようにする。
-    gateway._decline_when = lambda _: True  # noqa: SLF001
+    # 2 月の更新から決済が拒否されるようにする。
+    gateway.set_decline(lambda _: True)
     clock.set(FEB)
     report = container.renew_due_subscriptions.execute()
 
@@ -178,3 +178,87 @@ def test_every_past_due_subscription_is_expired_independently(
     assert report.canceled_for_nonpayment == 3
     for subscription_id in subscription_ids:
         assert container.queries.get_subscription(subscription_id).status == "canceled"
+
+
+def test_a_gateway_outage_does_not_stop_the_batch(
+    uow_factory: UnitOfWorkFactory, clock: FixedClock, ids: SequentialIdGenerator
+) -> None:
+    """1 件の決済が通信失敗しても、残りの契約は処理される。
+
+    ここで例外が上まで抜けると被害が二重になる。この契約より後ろが処理されず、
+    しかも更新自体は commit 済みなので次回の実行では is_due が偽になり、
+    発行済みの請求書を誰も拾わなくなる。契約は active のままなのでサービスは
+    提供され続け、静かに売上が消える。
+    """
+    gateway = FakePaymentGateway()
+    container = Container(uow_factory=uow_factory, clock=clock, ids=ids, gateway=gateway)
+    container.seed_plans()
+    for index in range(3):
+        subscribe(container, customer=f"cus-{index}")
+
+    # 更新のタイミングで、1 件だけ決済代行に届かなくする。
+    gateway.set_fail(lambda attempt: attempt.customer_id == "cus-0")
+    clock.set(FEB)
+
+    report = container.renew_due_subscriptions.execute()
+
+    assert report.renewed == 3
+    assert report.invoiced == 3
+    assert report.charge_unreachable == 1
+    # 「届かなかった」を「拒否された」と混ぜない。混ぜると通信障害で顧客が解約される。
+    assert report.payment_failed == 0
+
+
+def test_unsettled_invoices_are_settled_later(
+    uow_factory: UnitOfWorkFactory, clock: FixedClock, ids: SequentialIdGenerator
+) -> None:
+    """通信失敗で取り残された請求書を、あとから拾い直せる。
+
+    決済 API の呼び出しをトランザクションの外に出している以上、結果を反映する前に
+    落ちる窓は必ず開く。この後始末が存在して初めて、その設計が成立する。
+    """
+    gateway = FakePaymentGateway()
+    container = Container(uow_factory=uow_factory, clock=clock, ids=ids, gateway=gateway)
+    container.seed_plans()
+    subscription_id = subscribe(container)
+
+    gateway.set_fail(lambda _: True)
+    clock.set(FEB)
+    assert container.renew_due_subscriptions.execute().charge_unreachable == 1
+    assert [invoice.status for invoice in container.queries.list_invoices("cus-1")] == [
+        "paid",
+        "open",
+    ]
+
+    # 決済代行が復旧した。
+    gateway.set_fail(None)
+    clock.set(FEB + timedelta(hours=1))
+    report = container.settle_unpaid_invoices.execute()
+
+    assert report.examined == 1
+    assert report.settled == 1
+    assert [invoice.status for invoice in container.queries.list_invoices("cus-1")] == [
+        "paid",
+        "paid",
+    ]
+    assert container.queries.get_subscription(subscription_id).status == "active"
+    assert gateway.settled_amount == 2_000
+
+
+def test_settlement_ignores_invoices_that_may_still_be_in_flight(
+    uow_factory: UnitOfWorkFactory, clock: FixedClock, ids: SequentialIdGenerator
+) -> None:
+    """発行直後の請求書は掴まない。いま決済中かもしれない。"""
+    gateway = FakePaymentGateway()
+    container = Container(uow_factory=uow_factory, clock=clock, ids=ids, gateway=gateway)
+    container.seed_plans()
+    subscribe(container)
+
+    gateway.set_fail(lambda _: True)
+    clock.set(FEB)
+    container.renew_due_subscriptions.execute()
+
+    gateway.set_fail(None)
+    # まだ 15 分経っていない。
+    clock.set(FEB + timedelta(minutes=5))
+    assert container.settle_unpaid_invoices.execute().examined == 0

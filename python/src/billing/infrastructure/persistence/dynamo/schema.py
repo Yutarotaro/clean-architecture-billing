@@ -22,6 +22,9 @@ GSI2 = "gsi2"
 
 LIVE_PARTITION = "LIVE"
 PAST_DUE_PARTITION = "PASTDUE"
+#: 決着していない請求書。決済結果の反映漏れを拾い直すバッチが引く。
+#: LIVE と同じ GSI1 に相乗りしているが、パーティションキーが違うので衝突しない。
+UNSETTLED_PARTITION = "UNSETTLED"
 
 
 def plan_key(plan_id: PlanId | str) -> dict[str, str]:

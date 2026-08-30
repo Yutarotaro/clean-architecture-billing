@@ -21,6 +21,7 @@ from billing.application.usecases import (
     ChangePlan,
     RecordPaymentResult,
     RenewDueSubscriptions,
+    SettleUnpaidInvoices,
     SubscribeToPlan,
 )
 from billing.domain.ids import PlanId
@@ -81,6 +82,12 @@ class Container:
             clock=self.clock,
             ids=self.ids,
             gateway=self.gateway,
+        )
+
+    @cached_property
+    def settle_unpaid_invoices(self) -> SettleUnpaidInvoices:
+        return SettleUnpaidInvoices(
+            uow_factory=self.uow_factory, clock=self.clock, gateway=self.gateway
         )
 
     @cached_property

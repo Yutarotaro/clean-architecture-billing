@@ -44,6 +44,19 @@ class IdGenerator(Protocol):
     def new_id(self) -> str: ...
 
 
+class PaymentGatewayError(Exception):
+    """決済代行との通信そのものが失敗し、結果が分からない。
+
+    「カードが拒否された」は失敗ではなく ``PaymentResult(succeeded=False)`` で表す。
+    そちらは決済代行がはっきり「駄目だ」と答えた状態であり、こちらは答えが返って
+    こなかった状態である。両者を混同すると、タイムアウトしただけの請求を
+    「未払い」と判定して顧客を解約することになる。
+
+    結果が分からない以上、請求書は open のまま残す。実際には課金が成功している
+    かもしれないので、冪等キーを付けたうえで後から拾い直す。
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class PaymentResult:
     """決済代行からの応答。"""
@@ -68,6 +81,9 @@ class PaymentGateway(Protocol):
 
         ``idempotency_key`` は必須にしてある。ネットワークが不安定なときの再送で
         二重に課金しないための鍵であり、任意にすると必ず渡し忘れる。
+
+        通信自体に失敗したときは ``PaymentGatewayError`` を送出すること。
+        adapter の責任で、HTTP クライアントの例外をこれに翻訳する。
         """
         ...
 

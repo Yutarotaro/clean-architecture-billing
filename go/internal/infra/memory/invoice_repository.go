@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/Yutarotaro/clean-architecture-billing/go/internal/domain"
 	"github.com/Yutarotaro/clean-architecture-billing/go/internal/infra/storage"
@@ -79,6 +80,32 @@ func (r *invoiceRepo) FindByIdempotencyKey(
 		}
 	}
 	return nil, nil
+}
+
+func (r *invoiceRepo) ListUnsettled(
+	_ context.Context, issuedBefore time.Time, limit int,
+) ([]*domain.Invoice, error) {
+	var found []*domain.Invoice
+	for _, invoice := range r.merged() {
+		if invoice.Status != domain.InvoiceOpen || invoice.IssuedAt == nil {
+			continue
+		}
+		if invoice.IssuedAt.After(issuedBefore) {
+			continue
+		}
+		r.rememberVersion(string(invoice.ID))
+		found = append(found, cloneInvoice(invoice))
+	}
+	sort.Slice(found, func(i, j int) bool {
+		if found[i].IssuedAt.Equal(*found[j].IssuedAt) {
+			return found[i].ID < found[j].ID
+		}
+		return found[i].IssuedAt.Before(*found[j].IssuedAt)
+	})
+	if limit > 0 && len(found) > limit {
+		found = found[:limit]
+	}
+	return found, nil
 }
 
 func (r *invoiceRepo) ListForCustomer(
