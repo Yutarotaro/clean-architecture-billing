@@ -36,6 +36,7 @@ theme:
 
 nav:
   - はじめに: index.md
+  - DDD の用語: ddd-glossary.md
   - アーキテクチャ:
       - レイヤーと依存の向き: architecture.md
       - ドメインモデル: domain-model.md
